@@ -1,0 +1,9 @@
+streamlit
+scikit-learn
+numpy
+opencv-python
+pillow
+matplotlib
+pandas
+openpyxl
+altair
