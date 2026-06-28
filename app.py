@@ -353,40 +353,181 @@ def image_download_link(path: str) -> str:
 
 
 def apply_theme() -> None:
-    dark = setting("dark_mode", bool)
-    bg = "#0f172a" if dark else "#f6f8fb"
-    panel = "#111827" if dark else "#ffffff"
-    text = "#e5e7eb" if dark else "#172033"
-    muted = "#9ca3af" if dark else "#657085"
-    border = "#263244" if dark else "#e6eaf1"
     st.markdown(
-        f"""
+        """
         <style>
-        .stApp {{ background: {bg}; color: {text}; }}
-        [data-testid="stSidebar"] {{ background: {panel}; border-right: 1px solid {border}; }}
-        h1, h2, h3, h4, h5, h6, p, label, span {{ color: {text}; }}
-        .metric-card {{
-            background:{panel}; border:1px solid {border}; border-radius:8px;
-            padding:18px; box-shadow:0 8px 22px rgba(15,23,42,.06); min-height:112px;
-        }}
-        .metric-label {{ color:{muted}; font-size:.82rem; text-transform:uppercase; letter-spacing:.04em; }}
-        .metric-value {{ color:{text}; font-size:2rem; font-weight:800; line-height:1.1; }}
-        .metric-sub {{ color:{muted}; font-size:.88rem; margin-top:8px; }}
-        .status-ok {{ color:#047857; font-weight:700; }}
-        .status-warn {{ color:#b45309; font-weight:700; }}
-        .status-danger {{ color:#b91c1c; font-weight:700; }}
-        .block-container {{ padding-top:1.8rem; max-width:1420px; }}
-        div[data-testid="stButton"] button {{ border-radius:8px; font-weight:700; }}
-        div[data-testid="stDownloadButton"] button {{ border-radius:8px; }}
-        .alert-box {{
-            border-left:5px solid #dc2626; background:rgba(220,38,38,.10);
-            padding:14px 16px; border-radius:8px; margin:8px 0 16px;
-        }}
-        .soft-box {{
-            background:{panel}; border:1px solid {border}; border-radius:8px;
+        :root {
+            --void:#030712;
+            --panel:#07111f;
+            --panel-2:#0b1728;
+            --line:rgba(56,189,248,.42);
+            --blue:#38bdf8;
+            --blue-hot:#0ea5e9;
+            --cyan:#67e8f9;
+            --text:#e5f7ff;
+            --muted:#8ddcff;
+            --danger:#fb7185;
+            --ok:#5eead4;
+            --warn:#facc15;
+            --glow:0 0 18px rgba(56,189,248,.30), 0 0 40px rgba(14,165,233,.18);
+        }
+        .stApp {
+            background:
+                radial-gradient(circle at 18% 8%, rgba(56,189,248,.18), transparent 30%),
+                linear-gradient(135deg, #020617 0%, #07111f 48%, #030712 100%);
+            color:var(--text);
+        }
+        .stApp::before {
+            content:"";
+            position:fixed;
+            inset:0;
+            pointer-events:none;
+            background-image:
+                linear-gradient(rgba(56,189,248,.06) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(56,189,248,.06) 1px, transparent 1px);
+            background-size:44px 44px;
+            mask-image:linear-gradient(to bottom, rgba(0,0,0,.72), transparent 78%);
+        }
+        [data-testid="stSidebar"] {
+            background:rgba(3,7,18,.92);
+            border-right:1px solid var(--line);
+            box-shadow:18px 0 44px rgba(0,0,0,.35);
+        }
+        [data-testid="stSidebar"] * { color:var(--text); }
+        h1, h2, h3, h4, h5, h6 {
+            color:var(--text);
+            letter-spacing:0;
+            text-shadow:0 0 18px rgba(56,189,248,.34);
+        }
+        h1 {
+            font-weight:900;
+            background:linear-gradient(90deg, #ffffff, var(--cyan), var(--blue));
+            -webkit-background-clip:text;
+            background-clip:text;
+            color:transparent;
+        }
+        p, label, span, li, div, small { color:var(--text); }
+        a { color:var(--cyan) !important; }
+        code {
+            color:var(--cyan);
+            background:rgba(56,189,248,.12);
+            border:1px solid rgba(56,189,248,.28);
+            border-radius:6px;
+        }
+        .metric-card {
+            background:linear-gradient(145deg, rgba(7,17,31,.96), rgba(14,35,58,.90));
+            border:1px solid var(--line);
+            border-radius:8px;
+            padding:18px;
+            box-shadow:var(--glow), inset 0 1px 0 rgba(255,255,255,.08);
+            min-height:112px;
+            color:var(--text);
+            transition:transform .18s ease, border-color .18s ease, box-shadow .18s ease;
+        }
+        .metric-card:hover {
+            transform:translateY(-2px);
+            border-color:rgba(103,232,249,.82);
+            box-shadow:0 0 28px rgba(56,189,248,.42), 0 0 60px rgba(14,165,233,.24);
+        }
+        .metric-label { color:var(--muted); font-size:.82rem; text-transform:uppercase; letter-spacing:.04em; }
+        .metric-value { color:var(--cyan); font-size:2rem; font-weight:900; line-height:1.1; text-shadow:0 0 16px rgba(103,232,249,.55); }
+        .metric-sub { color:var(--muted); font-size:.88rem; margin-top:8px; }
+        .status-ok { color:var(--ok); font-weight:800; }
+        .status-warn { color:var(--warn); font-weight:800; }
+        .status-danger { color:var(--danger); font-weight:800; }
+        .block-container { padding-top:1.8rem; max-width:1420px; }
+        div[data-testid="stButton"] button,
+        div[data-testid="stDownloadButton"] button,
+        div[data-testid="stFormSubmitButton"] button {
+            border-radius:8px;
+            font-weight:900;
+            color:#02111f;
+            background:linear-gradient(90deg, var(--cyan), var(--blue));
+            border:1px solid rgba(103,232,249,.70);
+            box-shadow:0 0 18px rgba(56,189,248,.32);
+        }
+        div[data-testid="stButton"] button:hover,
+        div[data-testid="stDownloadButton"] button:hover,
+        div[data-testid="stFormSubmitButton"] button:hover {
+            color:#020617;
+            border-color:#ffffff;
+            box-shadow:0 0 26px rgba(103,232,249,.58);
+        }
+        [data-testid="stTextInput"] input,
+        [data-testid="stNumberInput"] input,
+        [data-testid="stTextArea"] textarea,
+        [data-testid="stSelectbox"] div,
+        [data-testid="stMultiSelect"] div {
+            background:rgba(5,15,29,.96) !important;
+            color:var(--cyan) !important;
+            border-color:rgba(56,189,248,.55) !important;
+            box-shadow:inset 0 0 0 1px rgba(56,189,248,.12), 0 0 14px rgba(56,189,248,.16);
+        }
+        [data-testid="stTextInput"] input::placeholder,
+        [data-testid="stTextArea"] textarea::placeholder {
+            color:rgba(141,220,255,.70) !important;
+        }
+        [data-testid="stTextInput"] input:focus,
+        [data-testid="stNumberInput"] input:focus,
+        [data-testid="stTextArea"] textarea:focus {
+            border-color:var(--cyan) !important;
+            box-shadow:0 0 0 1px var(--cyan), 0 0 22px rgba(103,232,249,.30) !important;
+        }
+        div[data-testid="stAlert"] {
+            background:rgba(7,17,31,.96);
+            color:var(--cyan);
+            border:1px solid var(--line);
+            border-radius:8px;
+            box-shadow:var(--glow);
+        }
+        div[data-testid="stAlert"] * { color:var(--cyan) !important; }
+        [data-testid="stDataFrame"],
+        [data-testid="stTable"],
+        [data-testid="stFileUploader"],
+        [data-testid="stCameraInput"],
+        [data-testid="stForm"] {
+            background:rgba(7,17,31,.74);
+            border:1px solid rgba(56,189,248,.28);
+            border-radius:8px;
+            box-shadow:0 0 22px rgba(14,165,233,.14);
+            padding:10px;
+        }
+        [data-testid="stTabs"] button { color:var(--muted); }
+        [data-testid="stTabs"] button[aria-selected="true"] { color:var(--cyan); }
+        [data-baseweb="radio"] label,
+        [data-baseweb="checkbox"] label {
+            background:rgba(7,17,31,.70);
+            border-radius:8px;
+            color:var(--text);
+        }
+        .alert-box {
+            border-left:5px solid var(--danger);
+            background:rgba(251,113,133,.12);
+            color:var(--text);
+            padding:14px 16px;
+            border-radius:8px;
+            margin:8px 0 16px;
+            box-shadow:0 0 18px rgba(251,113,133,.16);
+        }
+        .soft-box {
+            background:linear-gradient(145deg, rgba(7,17,31,.96), rgba(8,31,54,.86));
+            border:1px solid var(--line);
+            border-radius:8px;
             padding:16px; margin-bottom:14px;
-        }}
-        .pill {{ display:inline-block; padding:4px 10px; border-radius:999px; background:#e0f2fe; color:#075985; font-weight:700; }}
+            color:var(--cyan);
+            box-shadow:var(--glow);
+        }
+        .soft-box,
+        .soft-box * {
+            color:var(--cyan) !important;
+            text-shadow:0 0 10px rgba(103,232,249,.28);
+        }
+        .soft-box b,
+        .soft-box strong {
+            color:var(--cyan);
+            text-shadow:0 0 12px rgba(103,232,249,.45);
+        }
+        .pill { display:inline-block; padding:4px 10px; border-radius:999px; background:rgba(56,189,248,.16); color:var(--cyan); border:1px solid var(--line); font-weight:800; }
         </style>
         """,
         unsafe_allow_html=True,
