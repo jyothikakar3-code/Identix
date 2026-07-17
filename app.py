@@ -249,6 +249,32 @@ def cascades() -> tuple[Any, Any]:
     return (None if face.empty() else face, None if eye.empty() else eye)
 
 
+@st.cache_resource
+def face_detectors() -> list[tuple[Any, bool, float, float]]:
+    """Load complementary frontal and profile detectors.
+
+    The boolean marks profile cascades, which are also run on a mirrored image
+    so faces turned in either direction can be found.
+    """
+    if not hasattr(cv2, "CascadeClassifier") or not hasattr(cv2, "data"):
+        return []
+    cascade_dir = Path(getattr(cv2.data, "haarcascades", ""))
+    detector_specs = [
+        # Cascade feature weights use different numeric scales, so each model
+        # has its own offset and scale for the displayed confidence.
+        ("haarcascade_frontalface_default.xml", False, 2.0, 2.0),
+        ("haarcascade_frontalface_alt.xml", False, 100.0, 5.0),
+        ("haarcascade_frontalface_alt2.xml", False, 50.0, 4.0),
+        ("haarcascade_profileface.xml", True, 1.0, 1.0),
+    ]
+    loaded = []
+    for filename, is_profile, offset, scale in detector_specs:
+        detector = cv2.CascadeClassifier(str(cascade_dir / filename))
+        if not detector.empty():
+            loaded.append((detector, is_profile, offset, scale))
+    return loaded
+
+
 def pil_to_bgr(image: Image.Image) -> np.ndarray:
     return cv2.cvtColor(np.array(image.convert("RGB")), cv2.COLOR_RGB2BGR)
 
@@ -258,24 +284,50 @@ def uploaded_to_bgr(file: Any) -> np.ndarray:
 
 
 def detect_faces(frame_bgr: np.ndarray) -> list[dict[str, Any]]:
-    face_cascade, _ = cascades()
-    if face_cascade is None:
+    detectors = face_detectors()
+    if not detectors:
         raise RuntimeError("The human-face detector could not be loaded.")
     gray = cv2.equalizeHist(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY))
-    faces, _, feature_weights = face_cascade.detectMultiScale3(
-        gray,
-        scaleFactor=1.08,
-        minNeighbors=5,
-        minSize=(64, 64),
-        outputRejectLevels=True,
-    )
     detections = []
-    for (x, y, fw, fh), feature_weight in zip(faces, feature_weights):
-        # Convert the cascade's real, image-dependent feature margin to a
-        # probability-like score. It is not derived from bounding-box size.
-        confidence = float(1.0 / (1.0 + np.exp(-(float(feature_weight) - 2.0) / 2.0)))
-        detections.append({"box": (int(x), int(y), int(fw), int(fh)), "confidence": confidence})
-    return detections
+    for detector, is_profile, offset, weight_scale in detectors:
+        # Profile cascades are a fallback. Running them after a frontal match
+        # can add small false duplicate boxes around facial features.
+        if is_profile and detections:
+            continue
+        views = [(gray, False), (cv2.flip(gray, 1), True)] if is_profile else [(gray, False)]
+        for view, mirrored in views:
+            faces, _, feature_weights = detector.detectMultiScale3(
+                view,
+                scaleFactor=1.05,
+                minNeighbors=4,
+                minSize=(32, 32),
+                outputRejectLevels=True,
+            )
+            for (x, y, fw, fh), feature_weight in zip(faces, feature_weights):
+                if mirrored:
+                    x = gray.shape[1] - x - fw
+                confidence = float(1.0 / (1.0 + np.exp(-(float(feature_weight) - offset) / weight_scale)))
+                candidate = {"box": (int(x), int(y), int(fw), int(fh)), "confidence": confidence}
+                detections.append(candidate)
+
+    # Several cascades often find the same face. Keep only the strongest
+    # overlapping result so the UI reports one person once.
+    kept = []
+    for candidate in sorted(detections, key=lambda item: item["confidence"], reverse=True):
+        x, y, w, h = candidate["box"]
+        duplicate = False
+        for existing in kept:
+            ex, ey, ew, eh = existing["box"]
+            overlap_w = max(0, min(x + w, ex + ew) - max(x, ex))
+            overlap_h = max(0, min(y + h, ey + eh) - max(y, ey))
+            intersection = overlap_w * overlap_h
+            union = w * h + ew * eh - intersection
+            if intersection / max(1, union) >= 0.35:
+                duplicate = True
+                break
+        if not duplicate:
+            kept.append(candidate)
+    return kept
 
 
 def crop_face(frame_bgr: np.ndarray, box: tuple[int, int, int, int]) -> np.ndarray:

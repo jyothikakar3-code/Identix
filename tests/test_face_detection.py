@@ -41,7 +41,7 @@ class FaceDetectionTests(unittest.TestCase):
 
     def test_missing_detector_never_fabricates_a_face(self) -> None:
         image = np.zeros((480, 640, 3), dtype=np.uint8)
-        with patch.object(app, "cascades", return_value=(None, None)):
+        with patch.object(app, "face_detectors", return_value=[]):
             with self.assertRaisesRegex(RuntimeError, "could not be loaded"):
                 app.detect_faces(image)
 
