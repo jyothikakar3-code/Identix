@@ -246,19 +246,7 @@ def cascades() -> tuple[Any, Any]:
     cascade_dir = getattr(cv2.data, "haarcascades", "")
     face = cv2.CascadeClassifier(str(Path(cascade_dir) / "haarcascade_frontalface_default.xml"))
     eye = cv2.CascadeClassifier(str(Path(cascade_dir) / "haarcascade_eye.xml"))
-    if face.empty() or eye.empty():
-        return None, None
-    return face, eye
-
-
-def fallback_face_detection(frame_bgr: np.ndarray) -> list[dict[str, Any]]:
-    h, w = frame_bgr.shape[:2]
-    if h < 40 or w < 40:
-        return []
-    size = int(min(h, w) * 0.58)
-    x = max(0, (w - size) // 2)
-    y = max(0, (h - size) // 3)
-    return [{"box": (x, y, size, size), "confidence": 0.60}]
+    return (None if face.empty() else face, None if eye.empty() else eye)
 
 
 def pil_to_bgr(image: Image.Image) -> np.ndarray:
@@ -272,14 +260,20 @@ def uploaded_to_bgr(file: Any) -> np.ndarray:
 def detect_faces(frame_bgr: np.ndarray) -> list[dict[str, Any]]:
     face_cascade, _ = cascades()
     if face_cascade is None:
-        return fallback_face_detection(frame_bgr)
-    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.08, minNeighbors=5, minSize=(64, 64))
+        raise RuntimeError("The human-face detector could not be loaded.")
+    gray = cv2.equalizeHist(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY))
+    faces, _, feature_weights = face_cascade.detectMultiScale3(
+        gray,
+        scaleFactor=1.08,
+        minNeighbors=5,
+        minSize=(64, 64),
+        outputRejectLevels=True,
+    )
     detections = []
-    h, w = gray.shape
-    for (x, y, fw, fh) in faces:
-        area_ratio = (fw * fh) / max(1, w * h)
-        confidence = float(np.clip(0.52 + area_ratio * 3.8, 0.55, 0.99))
+    for (x, y, fw, fh), feature_weight in zip(faces, feature_weights):
+        # Convert the cascade's real, image-dependent feature margin to a
+        # probability-like score. It is not derived from bounding-box size.
+        confidence = float(1.0 / (1.0 + np.exp(-(float(feature_weight) - 2.0) / 2.0)))
         detections.append({"box": (int(x), int(y), int(fw), int(fh)), "confidence": confidence})
     return detections
 
@@ -725,7 +719,11 @@ def face_detection() -> None:
     image_file = st.file_uploader("Upload an image", type=["jpg", "jpeg", "png"]) if mode == "Upload Image" else st.camera_input("Capture from webcam")
     if image_file:
         frame = uploaded_to_bgr(image_file)
-        detections = detect_faces(frame)
+        try:
+            detections = detect_faces(frame)
+        except RuntimeError as error:
+            st.error(str(error))
+            return
         st.image(draw_boxes(frame, detections), caption=f"{len(detections)} face(s) detected", width="stretch")
         if detections:
             st.dataframe(pd.DataFrame([{"Face": i + 1, "Confidence": f"{d['confidence']:.1%}", "Box": d["box"]} for i, d in enumerate(detections)]), hide_index=True, width="stretch")
@@ -877,26 +875,26 @@ def liveness() -> None:
     if st.button("Run liveness verification", disabled=len(st.session_state.live_frames) < 3, width="stretch"):
         latest = st.session_state.live_frames[-3:]
         face_cascade, eye_cascade = cascades()
+        if face_cascade is None:
+            st.error("The human-face detector could not be loaded.")
+            return
         centers, eye_counts = [], []
         for frame in latest:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            if face_cascade is None:
-                fallback_faces = fallback_face_detection(frame)
-                faces = [fallback_faces[0]["box"]] if fallback_faces else []
-                eyes = []
-            else:
-                faces = face_cascade.detectMultiScale(gray, 1.08, 5, minSize=(64, 64))
+            faces = face_cascade.detectMultiScale(gray, 1.08, 5, minSize=(64, 64))
             if len(faces) != 1:
                 st.error("Spoof Detected: every liveness frame must contain exactly one face.")
                 return
             x, y, w, h = faces[0]
-            if face_cascade is not None:
+            if eye_cascade is not None:
                 roi = gray[y : y + h // 2, x : x + w]
                 eyes = eye_cascade.detectMultiScale(roi, 1.08, 4, minSize=(18, 18))
+            else:
+                eyes = []
             centers.append((x + w / 2, y + h / 2, w))
             eye_counts.append(len(eyes))
         movement = abs(centers[0][0] - centers[-1][0]) / max(1, centers[0][2])
-        blink_ok = min(eye_counts) < max(eye_counts) if face_cascade is not None else True
+        blink_ok = min(eye_counts) < max(eye_counts) if eye_cascade is not None else False
         move_ok = movement > 0.08
         if (blink_ok or not setting("blink_required", bool)) and (move_ok or not setting("head_movement_required", bool)):
             st.success("Live Person")
