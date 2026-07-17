@@ -14,6 +14,11 @@ ROOT = Path(__file__).parents[1]
 
 
 class FaceDetectionTests(unittest.TestCase):
+    def test_cascade_models_are_discoverable(self) -> None:
+        cascade_dir = app.cascade_directory()
+        self.assertIsNotNone(cascade_dir)
+        self.assertTrue((cascade_dir / "haarcascade_frontalface_default.xml").is_file())
+
     def test_registered_face_samples_have_feature_based_scores(self) -> None:
         scores = []
         for image_path in sorted((ROOT / "storage" / "registered").rglob("*.jpg")):

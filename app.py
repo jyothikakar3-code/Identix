@@ -241,12 +241,29 @@ def log(action: str, detail: str = "") -> None:
 
 @st.cache_resource
 def cascades() -> tuple[Any, Any]:
-    if not hasattr(cv2, "CascadeClassifier") or not hasattr(cv2, "data"):
+    cascade_dir = cascade_directory()
+    if not hasattr(cv2, "CascadeClassifier") or cascade_dir is None:
         return None, None
-    cascade_dir = getattr(cv2.data, "haarcascades", "")
-    face = cv2.CascadeClassifier(str(Path(cascade_dir) / "haarcascade_frontalface_default.xml"))
-    eye = cv2.CascadeClassifier(str(Path(cascade_dir) / "haarcascade_eye.xml"))
+    face = cv2.CascadeClassifier(str(cascade_dir / "haarcascade_frontalface_default.xml"))
+    eye = cv2.CascadeClassifier(str(cascade_dir / "haarcascade_eye.xml"))
     return (None if face.empty() else face, None if eye.empty() else eye)
+
+
+def cascade_directory() -> Path | None:
+    """Find OpenCV's XML models across local and hosted installations."""
+    candidates = []
+    data_module = getattr(cv2, "data", None)
+    configured_path = getattr(data_module, "haarcascades", "")
+    if configured_path:
+        candidates.append(Path(configured_path))
+    cv2_file = getattr(cv2, "__file__", "")
+    if cv2_file:
+        package_dir = Path(cv2_file).resolve().parent
+        candidates.extend([package_dir / "data", package_dir / "haarcascades"])
+    for candidate in candidates:
+        if (candidate / "haarcascade_frontalface_default.xml").is_file():
+            return candidate
+    return None
 
 
 @st.cache_resource
@@ -256,9 +273,9 @@ def face_detectors() -> list[tuple[Any, bool, float, float]]:
     The boolean marks profile cascades, which are also run on a mirrored image
     so faces turned in either direction can be found.
     """
-    if not hasattr(cv2, "CascadeClassifier") or not hasattr(cv2, "data"):
+    cascade_dir = cascade_directory()
+    if not hasattr(cv2, "CascadeClassifier") or cascade_dir is None:
         return []
-    cascade_dir = Path(getattr(cv2.data, "haarcascades", ""))
     detector_specs = [
         # Cascade feature weights use different numeric scales, so each model
         # has its own offset and scale for the displayed confidence.
