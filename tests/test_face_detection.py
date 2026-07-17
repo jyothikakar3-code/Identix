@@ -46,13 +46,25 @@ class FaceDetectionTests(unittest.TestCase):
 
     def test_missing_detector_never_fabricates_a_face(self) -> None:
         image = np.zeros((480, 640, 3), dtype=np.uint8)
-        with patch.object(app, "face_detectors", return_value=[]):
+        with patch.object(app, "detect_faces_yunet", return_value=None), patch.object(app, "face_detectors", return_value=[]):
             with self.assertRaisesRegex(RuntimeError, "could not be loaded"):
                 app.detect_faces(image)
 
     def test_face_candidate_requires_two_eye_features(self) -> None:
         image = np.zeros((200, 200), dtype=np.uint8)
         self.assertFalse(app.has_eye_pair(image, (20, 20, 160, 160)))
+
+    def test_yunet_output_uses_model_confidence(self) -> None:
+        model_output = np.array(
+            [[10, 20, 80, 90, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.91]],
+            dtype=np.float32,
+        )
+        detector = unittest.mock.Mock()
+        detector.detect.return_value = (None, model_output)
+        with patch.object(app, "yunet_detector", return_value=detector):
+            detections = app.detect_faces_yunet(np.zeros((200, 200, 3), dtype=np.uint8))
+        self.assertEqual(detections[0]["box"], (10, 20, 80, 90))
+        self.assertAlmostEqual(detections[0]["confidence"], 0.91, places=2)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ import os
 import shutil
 import sqlite3
 import time
+import urllib.request
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -27,11 +28,18 @@ DATA = ROOT / "data"
 REGISTERED_DIR = ROOT / "storage" / "registered"
 UNKNOWN_DIR = ROOT / "storage" / "unknown"
 REPORT_DIR = ROOT / "storage" / "reports"
+MODEL_DIR = ROOT / "models"
 DB_PATH = DATA / "face_system.sqlite3"
 FRESH_RESET_MARKER = "fresh_reset_2026_07_17"
 
-for folder in (DATA, REGISTERED_DIR, UNKNOWN_DIR, REPORT_DIR):
+for folder in (DATA, REGISTERED_DIR, UNKNOWN_DIR, REPORT_DIR, MODEL_DIR):
     folder.mkdir(parents=True, exist_ok=True)
+
+YUNET_MODEL_PATH = MODEL_DIR / "face_detection_yunet_2023mar.onnx"
+YUNET_MODEL_URL = (
+    "https://github.com/opencv/opencv_zoo/raw/main/models/"
+    "face_detection_yunet/face_detection_yunet_2023mar.onnx"
+)
 
 
 @dataclass
@@ -300,6 +308,65 @@ def uploaded_to_bgr(file: Any) -> np.ndarray:
     return pil_to_bgr(Image.open(file))
 
 
+@st.cache_resource
+def yunet_detector() -> Any:
+    """Load OpenCV YuNet, downloading the official MIT-licensed model once."""
+    if not hasattr(cv2, "FaceDetectorYN"):
+        return None
+    if not YUNET_MODEL_PATH.is_file() or YUNET_MODEL_PATH.stat().st_size < 100_000:
+        temporary_path = YUNET_MODEL_PATH.with_suffix(".download")
+        try:
+            with urllib.request.urlopen(YUNET_MODEL_URL, timeout=20) as response:
+                model_bytes = response.read()
+            if len(model_bytes) < 100_000:
+                return None
+            temporary_path.write_bytes(model_bytes)
+            temporary_path.replace(YUNET_MODEL_PATH)
+        except (OSError, ValueError):
+            return None
+    try:
+        return cv2.FaceDetectorYN.create(
+            str(YUNET_MODEL_PATH),
+            "",
+            (320, 320),
+            0.80,
+            0.30,
+            5000,
+        )
+    except cv2.error:
+        return None
+
+
+def detect_faces_yunet(frame_bgr: np.ndarray) -> list[dict[str, Any]] | None:
+    """Detect faces with YuNet; return None only when the model is unavailable."""
+    detector = yunet_detector()
+    if detector is None:
+        return None
+    height, width = frame_bgr.shape[:2]
+    if height == 0 or width == 0:
+        return []
+    scale = min(1.0, 1280.0 / max(height, width))
+    if scale < 1.0:
+        inference_frame = cv2.resize(frame_bgr, (int(width * scale), int(height * scale)), interpolation=cv2.INTER_AREA)
+    else:
+        inference_frame = frame_bgr
+    inference_height, inference_width = inference_frame.shape[:2]
+    detector.setInputSize((inference_width, inference_height))
+    _, faces = detector.detect(inference_frame)
+    if faces is None:
+        return []
+    detections = []
+    for face in faces:
+        x, y, w, h = (float(value) / scale for value in face[:4])
+        detections.append(
+            {
+                "box": (int(x), int(y), int(w), int(h)),
+                "confidence": float(face[-1]),
+            }
+        )
+    return detections
+
+
 def has_eye_pair(gray: np.ndarray, box: tuple[int, int, int, int]) -> bool:
     """Confirm that a face candidate contains a plausible pair of eyes."""
     _, eye_detector = cascades()
@@ -325,6 +392,12 @@ def has_eye_pair(gray: np.ndarray, box: tuple[int, int, int, int]) -> bool:
 
 
 def detect_faces(frame_bgr: np.ndarray) -> list[dict[str, Any]]:
+    yunet_detections = detect_faces_yunet(frame_bgr)
+    if yunet_detections is not None:
+        return yunet_detections
+
+    # Offline fallback for environments where the neural model cannot be
+    # downloaded. The eye-pair gate prevents object false positives.
     detectors = face_detectors()
     if not detectors:
         raise RuntimeError("The human-face detector could not be loaded.")
