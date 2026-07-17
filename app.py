@@ -1023,7 +1023,10 @@ def verification() -> None:
         similarity = (cosine(embedding(faces[0]), embedding(faces[1])) + 1) / 2
         same = similarity >= setting("recognition_threshold", float)
         st.metric("Similarity", f"{similarity:.1%}")
-        st.success("Same person") if same else st.error("Different people")
+        if same:
+            st.success("Same person")
+        else:
+            st.error("Different people")
         st.image([Image.fromarray(cv2.cvtColor(f, cv2.COLOR_BGR2RGB)) for f in faces], width=260)
 
 
