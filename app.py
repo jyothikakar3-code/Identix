@@ -300,6 +300,30 @@ def uploaded_to_bgr(file: Any) -> np.ndarray:
     return pil_to_bgr(Image.open(file))
 
 
+def has_eye_pair(gray: np.ndarray, box: tuple[int, int, int, int]) -> bool:
+    """Confirm that a face candidate contains a plausible pair of eyes."""
+    _, eye_detector = cascades()
+    if eye_detector is None:
+        raise RuntimeError("The facial-feature detector could not be loaded.")
+    x, y, w, h = box
+    upper_face = gray[y : y + int(h * 0.68), x : x + w]
+    min_eye = max(10, min(w, h) // 10)
+    eyes = eye_detector.detectMultiScale(
+        upper_face,
+        scaleFactor=1.05,
+        minNeighbors=4,
+        minSize=(min_eye, min_eye),
+    )
+    centers = [(ex + ew / 2, ey + eh / 2) for ex, ey, ew, eh in eyes]
+    for index, first in enumerate(centers):
+        for second in centers[index + 1 :]:
+            horizontal_gap = abs(first[0] - second[0])
+            vertical_gap = abs(first[1] - second[1])
+            if horizontal_gap >= w * 0.18 and vertical_gap <= h * 0.25:
+                return True
+    return False
+
+
 def detect_faces(frame_bgr: np.ndarray) -> list[dict[str, Any]]:
     detectors = face_detectors()
     if not detectors:
@@ -324,8 +348,9 @@ def detect_faces(frame_bgr: np.ndarray) -> list[dict[str, Any]]:
                 if mirrored:
                     x = gray.shape[1] - x - fw
                 confidence = float(1.0 / (1.0 + np.exp(-(float(feature_weight) - offset) / weight_scale)))
-                candidate = {"box": (int(x), int(y), int(fw), int(fh)), "confidence": confidence}
-                detections.append(candidate)
+                box = (int(x), int(y), int(fw), int(fh))
+                if has_eye_pair(gray, box):
+                    detections.append({"box": box, "confidence": confidence})
 
     # Several cascades often find the same face. Keep only the strongest
     # overlapping result so the UI reports one person once.

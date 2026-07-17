@@ -50,6 +50,10 @@ class FaceDetectionTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "could not be loaded"):
                 app.detect_faces(image)
 
+    def test_face_candidate_requires_two_eye_features(self) -> None:
+        image = np.zeros((200, 200), dtype=np.uint8)
+        self.assertFalse(app.has_eye_pair(image, (20, 20, 160, 160)))
+
 
 if __name__ == "__main__":
     unittest.main()
