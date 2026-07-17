@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ REGISTERED_DIR = ROOT / "storage" / "registered"
 UNKNOWN_DIR = ROOT / "storage" / "unknown"
 REPORT_DIR = ROOT / "storage" / "reports"
 DB_PATH = DATA / "face_system.sqlite3"
+FRESH_RESET_MARKER = "fresh_reset_2026_07_17"
 
 for folder in (DATA, REGISTERED_DIR, UNKNOWN_DIR, REPORT_DIR):
     folder.mkdir(parents=True, exist_ok=True)
@@ -143,6 +145,59 @@ def init_db() -> None:
         cur.execute(
             "INSERT INTO cameras(name, kind, source, status) VALUES('Default Webcam', 'Webcam', '0', 'Configured')"
         )
+    fresh_reset_done = cur.execute(
+        "SELECT COUNT(*) AS count FROM settings WHERE key = ?", (FRESH_RESET_MARKER,)
+    ).fetchone()["count"]
+    if fresh_reset_done == 0:
+        reset_storage_files()
+        cur.executescript(
+            """
+            DELETE FROM people;
+            DELETE FROM attendance;
+            DELETE FROM unknown_visitors;
+            DELETE FROM activity_logs;
+            DELETE FROM cameras;
+            DELETE FROM sqlite_sequence WHERE name IN ('people', 'attendance', 'unknown_visitors', 'activity_logs', 'cameras');
+            """
+        )
+        cur.execute(
+            "INSERT INTO cameras(name, kind, source, status) VALUES('Default Webcam', 'Webcam', '0', 'Configured')"
+        )
+        cur.execute("INSERT INTO settings(key, value) VALUES(?, ?)", (FRESH_RESET_MARKER, "true"))
+        cur.execute(
+            "INSERT INTO activity_logs(actor, action, detail, created_at) VALUES(?, ?, ?, ?)",
+            ("system", "Fresh start reset", "Cleared old people, attendance, visitors, and reports", now_iso()),
+        )
+    con.commit()
+    con.close()
+
+
+def reset_storage_files() -> None:
+    for folder in (REGISTERED_DIR, UNKNOWN_DIR, REPORT_DIR):
+        if folder.exists():
+            shutil.rmtree(folder)
+        folder.mkdir(parents=True, exist_ok=True)
+
+
+def reset_operational_data() -> None:
+    reset_storage_files()
+    con = connect()
+    cur = con.cursor()
+    cur.executescript(
+        """
+        DELETE FROM people;
+        DELETE FROM attendance;
+        DELETE FROM unknown_visitors;
+        DELETE FROM activity_logs;
+        DELETE FROM cameras;
+        DELETE FROM sqlite_sequence WHERE name IN ('people', 'attendance', 'unknown_visitors', 'activity_logs', 'cameras');
+        """
+    )
+    cur.execute("INSERT INTO cameras(name, kind, source, status) VALUES('Default Webcam', 'Webcam', '0', 'Configured')")
+    cur.execute(
+        "INSERT INTO activity_logs(actor, action, detail, created_at) VALUES(?, ?, ?, ?)",
+        (st.session_state.get("user", {}).get("username", "system"), "Fresh start reset", "Cleared operational data", now_iso()),
+    )
     con.commit()
     con.close()
 
@@ -569,7 +624,7 @@ def login_screen() -> None:
             st.subheader("Secure Login")
             username = st.text_input("Username", autocomplete="username")
             password = st.text_input("Password", type="password", autocomplete="current-password")
-            submitted = st.form_submit_button("Log in", use_container_width=True)
+            submitted = st.form_submit_button("Log in", width="stretch")
         if submitted:
             user = rows("auth_users", "WHERE username = ? AND password_hash = ?", (username, hash_password(password)))
             if user:
@@ -598,7 +653,7 @@ def sidebar() -> str:
     if dark != setting("dark_mode", bool):
         set_setting("dark_mode", dark)
         st.rerun()
-    if st.sidebar.button("Log out", use_container_width=True):
+    if st.sidebar.button("Log out", width="stretch"):
         log("Logout")
         st.session_state.pop("user", None)
         st.rerun()
@@ -636,15 +691,15 @@ def dashboard() -> None:
     else:
         attendance["day"] = pd.to_datetime(attendance["marked_at"]).dt.date.astype(str)
         daily = attendance.groupby("day", as_index=False).size().rename(columns={"size": "records"})
-        st.altair_chart(alt.Chart(daily).mark_line(point=True).encode(x="day", y="records").properties(height=260), use_container_width=True)
+        st.altair_chart(alt.Chart(daily).mark_line(point=True).encode(x="day", y="records").properties(height=260), width="stretch")
         c1, c2 = st.columns(2)
         dept = attendance.groupby("department", as_index=False).size().rename(columns={"size": "records"})
-        c1.altair_chart(alt.Chart(dept).mark_bar().encode(x="department", y="records", color="department").properties(height=260), use_container_width=True)
+        c1.altair_chart(alt.Chart(dept).mark_bar().encode(x="department", y="records", color="department").properties(height=260), width="stretch")
         status = attendance.groupby("status", as_index=False).size().rename(columns={"size": "records"})
-        c2.altair_chart(alt.Chart(status).mark_arc(innerRadius=45).encode(theta="records", color="status").properties(height=260), use_container_width=True)
+        c2.altair_chart(alt.Chart(status).mark_arc(innerRadius=45).encode(theta="records", color="status").properties(height=260), width="stretch")
 
     st.subheader("Recent Activity")
-    st.dataframe(pd.DataFrame(rows("activity_logs", "ORDER BY created_at DESC LIMIT 12")), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(rows("activity_logs", "ORDER BY created_at DESC LIMIT 12")), width="stretch", hide_index=True)
 
 
 def face_detection() -> None:
@@ -654,9 +709,9 @@ def face_detection() -> None:
     if image_file:
         frame = uploaded_to_bgr(image_file)
         detections = detect_faces(frame)
-        st.image(draw_boxes(frame, detections), caption=f"{len(detections)} face(s) detected", use_container_width=True)
+        st.image(draw_boxes(frame, detections), caption=f"{len(detections)} face(s) detected", width="stretch")
         if detections:
-            st.dataframe(pd.DataFrame([{"Face": i + 1, "Confidence": f"{d['confidence']:.1%}", "Box": d["box"]} for i, d in enumerate(detections)]), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame([{"Face": i + 1, "Confidence": f"{d['confidence']:.1%}", "Box": d["box"]} for i, d in enumerate(detections)]), hide_index=True, width="stretch")
         else:
             st.warning("No face was detected. Try a clearer frontal image with good lighting.")
 
@@ -676,7 +731,7 @@ def face_registration() -> None:
         status = c3.selectbox("Status", ["Active", "Inactive"])
         uploads = st.file_uploader("Upload multiple clear face images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
         camera_sample = st.camera_input("Optional webcam sample")
-        submitted = st.form_submit_button("Register Face", use_container_width=True)
+        submitted = st.form_submit_button("Register Face", width="stretch")
     if submitted:
         errors = []
         if not all([name.strip(), person_id.strip(), department.strip(), email.strip(), phone.strip()]):
@@ -751,10 +806,10 @@ def process_recognition_frame(frame: np.ndarray, camera_name: str, mark: bool) -
             labels.append(f"Unknown · {match.confidence:.0%}")
             register_unknown(face, detection["confidence"], camera_name)
             records.append({"Name": "Unknown", "ID": "-", "Department": "-", "Recognition Confidence": f"{match.confidence:.1%}", "Attendance": "Unknown alert saved"})
-    st.image(draw_boxes(frame, detections, labels), use_container_width=True)
+    st.image(draw_boxes(frame, detections, labels), width="stretch")
     if any(r["Name"] == "Unknown" for r in records):
         st.markdown("<div class='alert-box'><b>Unknown person detected.</b> Alert image and timestamp were saved.</div>", unsafe_allow_html=True)
-    st.dataframe(pd.DataFrame(records), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(records), width="stretch", hide_index=True)
 
 
 def face_recognition() -> None:
@@ -796,13 +851,13 @@ def liveness() -> None:
     if "live_frames" not in st.session_state:
         st.session_state.live_frames = []
     sample = st.camera_input("Capture liveness frame")
-    if sample and st.button("Add frame to liveness check", use_container_width=True):
+    if sample and st.button("Add frame to liveness check", width="stretch"):
         st.session_state.live_frames.append(uploaded_to_bgr(sample))
         st.toast(f"Captured frame {len(st.session_state.live_frames)}.", icon="📷")
     cols = st.columns(3)
     for i, frame in enumerate(st.session_state.live_frames[-3:]):
-        cols[i].image(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)), caption=f"Frame {i + 1}", use_container_width=True)
-    if st.button("Run liveness verification", disabled=len(st.session_state.live_frames) < 3, use_container_width=True):
+        cols[i].image(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)), caption=f"Frame {i + 1}", width="stretch")
+    if st.button("Run liveness verification", disabled=len(st.session_state.live_frames) < 3, width="stretch"):
         latest = st.session_state.live_frames[-3:]
         face_cascade, eye_cascade = cascades()
         centers, eye_counts = [], []
@@ -847,11 +902,11 @@ def attendance_page() -> None:
         if query:
             mask &= df.apply(lambda r: query.lower() in " ".join(map(str, r.values)).lower(), axis=1)
         df = df[mask].drop(columns=["date"])
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(df, width="stretch", hide_index=True)
     c1, c2, c3 = st.columns(3)
-    c1.download_button("Download CSV", df.to_csv(index=False).encode(), "attendance.csv", "text/csv", use_container_width=True)
-    c2.download_button("Download Excel", to_excel(df), "attendance.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
-    c3.download_button("Download PDF", simple_pdf_bytes(df, "Attendance Report"), "attendance.pdf", "application/pdf", use_container_width=True)
+    c1.download_button("Download CSV", df.to_csv(index=False).encode(), "attendance.csv", "text/csv", width="stretch")
+    c2.download_button("Download Excel", to_excel(df), "attendance.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
+    c3.download_button("Download PDF", simple_pdf_bytes(df, "Attendance Report"), "attendance.pdf", "application/pdf", width="stretch")
     if require_role(["Administrator", "Teacher/Manager"]):
         st.subheader("Edit or Delete Record")
         ids = df["id"].tolist() if not df.empty else []
@@ -882,13 +937,13 @@ def unknown_alerts() -> None:
     page_count = max(1, int(np.ceil(len(df) / per_page)))
     page = st.number_input("Page", min_value=1, max_value=page_count, value=1)
     shown = df.iloc[(page - 1) * per_page : page * per_page]
-    st.dataframe(shown.drop(columns=["image_path"]), use_container_width=True, hide_index=True)
+    st.dataframe(shown.drop(columns=["image_path"]), width="stretch", hide_index=True)
     st.subheader("Alert Images")
     cols = st.columns(4)
     for idx, row in shown.head(8).iterrows():
         src = image_download_link(row["image_path"])
         if src:
-            cols[idx % 4].image(src, caption=row["detected_at"], use_container_width=True)
+            cols[idx % 4].image(src, caption=row["detected_at"], width="stretch")
 
 
 def reports() -> None:
@@ -898,12 +953,12 @@ def reports() -> None:
     people = pd.DataFrame(rows("people", "ORDER BY name"))
     report_type = st.selectbox("Report type", ["Attendance", "Registered Users", "Unknown Visitors"])
     df = {"Attendance": attendance, "Registered Users": people, "Unknown Visitors": unknowns}[report_type]
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(df, width="stretch", hide_index=True)
     c1, c2, c3 = st.columns(3)
     base = report_type.lower().replace(" ", "_")
-    c1.download_button("CSV", df.to_csv(index=False).encode(), f"{base}.csv", "text/csv", use_container_width=True)
-    c2.download_button("Excel", to_excel(df), f"{base}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
-    c3.download_button("PDF", simple_pdf_bytes(df, f"{report_type} Report"), f"{base}.pdf", "application/pdf", use_container_width=True)
+    c1.download_button("CSV", df.to_csv(index=False).encode(), f"{base}.csv", "text/csv", width="stretch")
+    c2.download_button("Excel", to_excel(df), f"{base}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
+    c3.download_button("PDF", simple_pdf_bytes(df, f"{report_type} Report"), f"{base}.pdf", "application/pdf", width="stretch")
 
 
 def cameras() -> None:
@@ -911,13 +966,13 @@ def cameras() -> None:
         return
     st.title("Camera Management")
     df = pd.DataFrame(rows("cameras", "ORDER BY name"))
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(df, width="stretch", hide_index=True)
     with st.form("camera_form"):
         c1, c2, c3 = st.columns(3)
         name = c1.text_input("Camera Name")
         kind = c2.selectbox("Camera Type", ["Webcam", "USB Camera", "IP Camera", "CCTV/RTSP"])
         source = c3.text_input("Source", value="0", help="Use 0 for default webcam or an RTSP/IP URL.")
-        submit = st.form_submit_button("Add Camera", use_container_width=True)
+        submit = st.form_submit_button("Add Camera", width="stretch")
     if submit and name and source:
         execute("INSERT INTO cameras(name, kind, source, status) VALUES(?, ?, ?, ?)", (name, kind, source, "Configured"))
         log("Camera added", name)
@@ -926,7 +981,7 @@ def cameras() -> None:
     camera_map = {f"{c['name']} ({c['source']})": c for c in rows("cameras")}
     selected = st.selectbox("Camera", list(camera_map.keys())) if camera_map else None
     c1, c2, c3 = st.columns(3)
-    if selected and c1.button("Start / Capture Frame", use_container_width=True):
+    if selected and c1.button("Start / Capture Frame", width="stretch"):
         cam = camera_map[selected]
         source: Any = int(cam["source"]) if str(cam["source"]).isdigit() else cam["source"]
         start = time.time()
@@ -936,14 +991,14 @@ def cameras() -> None:
         fps = 1 / max(time.time() - start, 0.001)
         if ok:
             execute("UPDATE cameras SET status = ?, last_seen = ? WHERE id = ?", ("Online", now_iso(), cam["id"]))
-            st.image(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)), caption=f"Online · FPS {fps:.1f}", use_container_width=True)
+            st.image(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)), caption=f"Online · FPS {fps:.1f}", width="stretch")
         else:
             execute("UPDATE cameras SET status = ? WHERE id = ?", ("Offline", cam["id"]))
             st.error("Unable to read from this camera source.")
-    if selected and c2.button("Stop Camera", use_container_width=True):
+    if selected and c2.button("Stop Camera", width="stretch"):
         execute("UPDATE cameras SET status = ? WHERE id = ?", ("Stopped", camera_map[selected]["id"]))
         st.rerun()
-    if selected and c3.button("Delete Camera", use_container_width=True):
+    if selected and c3.button("Delete Camera", width="stretch"):
         execute("DELETE FROM cameras WHERE id = ?", (camera_map[selected]["id"],))
         log("Camera deleted", selected)
         st.rerun()
@@ -953,7 +1008,7 @@ def user_management() -> None:
     if not require_role(["Administrator"]):
         return
     st.title("User Management")
-    st.dataframe(pd.DataFrame(rows("auth_users", "ORDER BY username")).drop(columns=["password_hash"], errors="ignore"), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(rows("auth_users", "ORDER BY username")).drop(columns=["password_hash"], errors="ignore"), width="stretch", hide_index=True)
     with st.form("add_auth_user"):
         c1, c2, c3 = st.columns(3)
         username = c1.text_input("Username")
@@ -962,7 +1017,7 @@ def user_management() -> None:
         email = c1.text_input("Email")
         phone = c2.text_input("Phone")
         password = c3.text_input("Temporary Password", type="password")
-        submit = st.form_submit_button("Create Login", use_container_width=True)
+        submit = st.form_submit_button("Create Login", width="stretch")
     if submit:
         if not username or not display or len(password) < 6:
             st.error("Username, display name, and a password of at least 6 characters are required.")
@@ -978,7 +1033,7 @@ def user_management() -> None:
                 st.error("That username already exists.")
     st.subheader("Registered People")
     people = pd.DataFrame(rows("people", "ORDER BY name"))
-    st.dataframe(people.drop(columns=["embeddings", "image_paths"], errors="ignore"), use_container_width=True, hide_index=True)
+    st.dataframe(people.drop(columns=["embeddings", "image_paths"], errors="ignore"), width="stretch", hide_index=True)
     if not people.empty:
         selected = st.selectbox("Person ID", people["person_id"].tolist())
         c1, c2 = st.columns(2)
@@ -1001,7 +1056,7 @@ def profile() -> None:
         email = st.text_input("Email", value=user.get("email") or "")
         phone = st.text_input("Phone", value=user.get("phone") or "")
         password = st.text_input("New Password", type="password")
-        submit = st.form_submit_button("Save Profile", use_container_width=True)
+        submit = st.form_submit_button("Save Profile", width="stretch")
     if submit:
         if password and len(password) < 6:
             st.error("Password must be at least 6 characters.")
@@ -1025,7 +1080,7 @@ def settings_page() -> None:
         fps = st.number_input("Target FPS indicator", 1, 60, setting("camera_fps_target", int))
         blink = st.toggle("Require blink evidence for liveness", value=setting("blink_required", bool))
         movement = st.toggle("Require head movement for liveness", value=setting("head_movement_required", bool))
-        submit = st.form_submit_button("Save Settings", use_container_width=True)
+        submit = st.form_submit_button("Save Settings", width="stretch")
     if submit:
         for key, value in {
             "recognition_threshold": threshold,
@@ -1038,6 +1093,27 @@ def settings_page() -> None:
         log("Settings updated")
         st.success("Settings saved.")
 
+    st.subheader("Fresh Start Reset")
+    st.markdown(
+        """
+        <div class='soft-box'>
+        <b>Reset workspace data:</b> clears registered people, attendance, unknown visitor alerts,
+        saved face images, generated reports, and custom cameras. Login users and your profile stay intact.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    with st.form("fresh_start_reset"):
+        confirmation = st.text_input("Type RESET to confirm")
+        reset_submit = st.form_submit_button("Reset workspace data", width="stretch")
+    if reset_submit:
+        if confirmation.strip().upper() != "RESET":
+            st.error("Type RESET exactly before running the fresh start reset.")
+        else:
+            reset_operational_data()
+            st.success("Workspace reset complete. You can start fresh now.")
+            st.rerun()
+
 
 def activity_logs() -> None:
     if not require_role(["Administrator", "Teacher/Manager"]):
@@ -1047,7 +1123,7 @@ def activity_logs() -> None:
     search = st.text_input("Search logs")
     if search and not df.empty:
         df = df[df.apply(lambda r: search.lower() in " ".join(map(str, r.values)).lower(), axis=1)]
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(df, width="stretch", hide_index=True)
 
 
 def help_page() -> None:
