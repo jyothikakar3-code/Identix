@@ -85,7 +85,12 @@ def connect() -> Any:
     if persistent_database_enabled():
         if psycopg is None or dict_row is None:
             raise RuntimeError("PostgreSQL support is not installed. Install psycopg[binary].")
-        return psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=10)
+        return psycopg.connect(
+            DATABASE_URL,
+            row_factory=dict_row,
+            connect_timeout=10,
+            prepare_threshold=None,
+        )
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.row_factory = sqlite3.Row
     return con
