@@ -24,6 +24,13 @@ import pandas as pd
 import streamlit as st
 from PIL import Image
 
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except ImportError:  # SQLite remains available for local development.
+    psycopg = None
+    dict_row = None
+
 
 ROOT = Path(__file__).parent
 DATA = ROOT / "data"
@@ -32,7 +39,7 @@ UNKNOWN_DIR = ROOT / "storage" / "unknown"
 REPORT_DIR = ROOT / "storage" / "reports"
 MODEL_DIR = ROOT / "models"
 DB_PATH = DATA / "face_system.sqlite3"
-FRESH_RESET_MARKER = "fresh_reset_2026_07_17"
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
 for folder in (DATA, REGISTERED_DIR, UNKNOWN_DIR, REPORT_DIR, MODEL_DIR):
     folder.mkdir(parents=True, exist_ok=True)
@@ -56,6 +63,11 @@ LIVENESS_HEAD_MOVEMENT_THRESHOLD = 0.08
 RECOGNITION_MODEL_VERSION = "sface_v1"
 YUNET_INFERENCE_LOCK = threading.RLock()
 SFACE_INFERENCE_LOCK = threading.RLock()
+DATABASE_INTEGRITY_ERRORS = (
+    (sqlite3.IntegrityError, psycopg.IntegrityError)
+    if psycopg is not None
+    else (sqlite3.IntegrityError,)
+)
 
 
 @dataclass
@@ -65,10 +77,36 @@ class MatchResult:
     distance: float
 
 
-def connect() -> sqlite3.Connection:
+def persistent_database_enabled() -> bool:
+    return bool(DATABASE_URL)
+
+
+def connect() -> Any:
+    if persistent_database_enabled():
+        if psycopg is None or dict_row is None:
+            raise RuntimeError("PostgreSQL support is not installed. Install psycopg[binary].")
+        return psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=10)
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.row_factory = sqlite3.Row
     return con
+
+
+def database_query(query: str) -> str:
+    """Translate the app's portable placeholders for PostgreSQL."""
+    return query.replace("?", "%s") if persistent_database_enabled() else query
+
+
+def database_execute(con: Any, query: str, params: tuple[Any, ...] = ()) -> Any:
+    return con.execute(database_query(query), params)
+
+
+def database_script(con: Any, script: str) -> None:
+    if persistent_database_enabled():
+        for statement in script.split(";"):
+            if statement.strip():
+                con.execute(statement)
+    else:
+        con.executescript(script)
 
 
 def hash_password(password: str) -> str:
@@ -81,9 +119,7 @@ def now_iso() -> str:
 
 def init_db() -> None:
     con = connect()
-    cur = con.cursor()
-    cur.executescript(
-        """
+    schema = """
         CREATE TABLE IF NOT EXISTS auth_users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
@@ -146,7 +182,9 @@ def init_db() -> None:
             created_at TEXT NOT NULL
         );
         """
-    )
+    if persistent_database_enabled():
+        schema = schema.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "BIGSERIAL PRIMARY KEY")
+    database_script(con, schema)
     defaults = {
         "recognition_threshold": str(RECOGNITION_COSINE_THRESHOLD),
         "duplicate_minutes": "30",
@@ -156,55 +194,42 @@ def init_db() -> None:
         "camera_fps_target": "12",
     }
     for key, value in defaults.items():
-        cur.execute("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", (key, value))
-    model_version = cur.execute(
+        database_execute(
+            con,
+            "INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO NOTHING",
+            (key, value),
+        )
+    model_version = database_execute(
+        con,
         "SELECT value FROM settings WHERE key = 'recognition_model_version'"
     ).fetchone()
     if model_version is None or model_version["value"] != RECOGNITION_MODEL_VERSION:
-        cur.execute(
+        database_execute(
+            con,
             "INSERT INTO settings(key, value) VALUES('recognition_threshold', ?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (str(RECOGNITION_COSINE_THRESHOLD),),
         )
-        cur.execute(
+        database_execute(
+            con,
             "INSERT INTO settings(key, value) VALUES('recognition_model_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (RECOGNITION_MODEL_VERSION,),
         )
-    cur.execute(
+    database_execute(
+        con,
         """
-        INSERT OR IGNORE INTO auth_users(username, password_hash, role, display_name, email, phone, created_at)
+        INSERT INTO auth_users(username, password_hash, role, display_name, email, phone, created_at)
         VALUES('admin', ?, 'Administrator', 'System Administrator', 'admin@example.com', '', ?)
+        ON CONFLICT(username) DO NOTHING
         """,
         (hash_password("admin123"), now_iso()),
     )
-    existing_cameras = cur.execute("SELECT COUNT(*) AS count FROM cameras").fetchone()["count"]
+    existing_cameras = database_execute(con, "SELECT COUNT(*) AS count FROM cameras").fetchone()["count"]
     if existing_cameras == 0:
-        cur.execute(
+        database_execute(
+            con,
             "INSERT INTO cameras(name, kind, source, status) VALUES('Default Webcam', 'Webcam', '0', 'Configured')"
-        )
-    fresh_reset_done = cur.execute(
-        "SELECT COUNT(*) AS count FROM settings WHERE key = ?", (FRESH_RESET_MARKER,)
-    ).fetchone()["count"]
-    if fresh_reset_done == 0:
-        reset_storage_files()
-        cur.executescript(
-            """
-            DELETE FROM people;
-            DELETE FROM attendance;
-            DELETE FROM unknown_visitors;
-            DELETE FROM activity_logs;
-            DELETE FROM cameras;
-            DELETE FROM sqlite_sequence WHERE name IN ('people', 'attendance', 'unknown_visitors', 'activity_logs', 'cameras');
-            """
-        )
-        cur.execute(
-            "INSERT INTO cameras(name, kind, source, status) VALUES('Default Webcam', 'Webcam', '0', 'Configured')"
-        )
-        cur.execute("INSERT INTO settings(key, value) VALUES(?, ?)", (FRESH_RESET_MARKER, "true"))
-        cur.execute(
-            "INSERT INTO activity_logs(actor, action, detail, created_at) VALUES(?, ?, ?, ?)",
-            ("system", "Fresh start reset", "Cleared old people, attendance, visitors, and reports", now_iso()),
         )
     con.commit()
     con.close()
@@ -220,19 +245,22 @@ def reset_storage_files() -> None:
 def reset_operational_data() -> None:
     reset_storage_files()
     con = connect()
-    cur = con.cursor()
-    cur.executescript(
+    database_script(
+        con,
         """
         DELETE FROM people;
         DELETE FROM attendance;
         DELETE FROM unknown_visitors;
         DELETE FROM activity_logs;
         DELETE FROM cameras;
-        DELETE FROM sqlite_sequence WHERE name IN ('people', 'attendance', 'unknown_visitors', 'activity_logs', 'cameras');
         """
     )
-    cur.execute("INSERT INTO cameras(name, kind, source, status) VALUES('Default Webcam', 'Webcam', '0', 'Configured')")
-    cur.execute(
+    database_execute(
+        con,
+        "INSERT INTO cameras(name, kind, source, status) VALUES('Default Webcam', 'Webcam', '0', 'Configured')",
+    )
+    database_execute(
+        con,
         "INSERT INTO activity_logs(actor, action, detail, created_at) VALUES(?, ?, ?, ?)",
         (st.session_state.get("user", {}).get("username", "system"), "Fresh start reset", "Cleared operational data", now_iso()),
     )
@@ -243,14 +271,14 @@ def reset_operational_data() -> None:
 def rows(table: str, where: str = "", params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
     con = connect()
     query = f"SELECT * FROM {table} {where}"
-    items = [dict(r) for r in con.execute(query, params).fetchall()]
+    items = [dict(r) for r in database_execute(con, query, params).fetchall()]
     con.close()
     return items
 
 
 def execute(query: str, params: tuple[Any, ...] = ()) -> None:
     con = connect()
-    con.execute(query, params)
+    database_execute(con, query, params)
     con.commit()
     con.close()
 
@@ -1630,7 +1658,7 @@ def user_management() -> None:
                 )
                 log("Login user created", username)
                 st.rerun()
-            except sqlite3.IntegrityError:
+            except DATABASE_INTEGRITY_ERRORS:
                 st.error("That username already exists.")
     st.subheader("Registered People")
     people = pd.DataFrame(rows("people", "ORDER BY name"))
@@ -1675,6 +1703,13 @@ def settings_page() -> None:
     if not require_role(["Administrator"]):
         return
     st.title("System Settings")
+    if persistent_database_enabled():
+        st.success("Persistent database connected. Registrations survive app updates and restarts.")
+    else:
+        st.warning(
+            "Local SQLite mode is active. It is suitable for local development, but Streamlit Cloud "
+            "registrations may disappear after a redeployment. Add DATABASE_URL in Streamlit Secrets."
+        )
     with st.form("settings"):
         threshold = st.slider("Recognition cosine threshold", 0.30, 0.80, setting("recognition_threshold", float), 0.01)
         duplicate = st.number_input("Duplicate attendance prevention interval (minutes)", 1, 480, setting("duplicate_minutes", int))

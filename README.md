@@ -19,7 +19,8 @@ Change the password from the Profile page after login.
 
 ## Storage
 
-- Database: `data/face_system.sqlite3`
+- Production database: PostgreSQL through the `DATABASE_URL` Streamlit secret
+- Local-development fallback: `data/face_system.sqlite3`
 - Registered face crops: `storage/registered`
 - Unknown visitor images: `storage/unknown`
 - Reports: generated from the Attendance and Reports pages
@@ -30,6 +31,17 @@ The app uses local OpenCV-based face detection and image embeddings so it can ru
 without cloud services. For high-security deployment, connect a dedicated face
 recognition model, HTTPS authentication, encrypted backups, and organization privacy
 controls.
+
+For Streamlit Community Cloud, configure a persistent PostgreSQL connection in
+**Manage app → Settings → Secrets**:
+
+```toml
+DATABASE_URL = "postgresql://..."
+```
+
+The application creates its tables automatically. Never commit this credential
+to GitHub. Without `DATABASE_URL`, local SQLite data can be replaced when a cloud
+deployment restarts.
 
 ## Deploy Online
 

@@ -7,3 +7,4 @@ matplotlib
 pandas
 openpyxl
 altair
+psycopg[binary]>=3.2,<4

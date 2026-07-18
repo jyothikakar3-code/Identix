@@ -1,6 +1,7 @@
 """Regression tests for the face-detection confidence bug."""
 
 from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -65,6 +66,91 @@ class FaceDetectionTests(unittest.TestCase):
             detections = app.detect_faces_yunet(np.zeros((200, 200, 3), dtype=np.uint8))
         self.assertEqual(detections[0]["box"], (10, 20, 80, 90))
         self.assertAlmostEqual(detections[0]["confidence"], 0.91, places=2)
+
+
+class ApplicationRegressionTests(unittest.TestCase):
+    def test_reinitializing_database_never_deletes_registered_people(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_db = Path(temporary_directory) / "persistent.sqlite3"
+            with patch.object(app, "DB_PATH", temporary_db), patch.object(
+                app, "DATABASE_URL", ""
+            ), patch.object(app, "reset_storage_files") as reset_storage:
+                app.init_db()
+                app.execute(
+                    """
+                    INSERT INTO people(
+                        person_id, name, email, phone, department, embeddings,
+                        image_paths, status, created_at, updated_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "persist-1",
+                        "Persistent Person",
+                        "person@example.com",
+                        "",
+                        "Test",
+                        "[]",
+                        "[]",
+                        "Active",
+                        app.now_iso(),
+                        app.now_iso(),
+                    ),
+                )
+
+                app.init_db()
+                people = app.rows("people", "WHERE person_id = ?", ("persist-1",))
+
+            self.assertEqual(len(people), 1)
+            self.assertEqual(people[0]["name"], "Persistent Person")
+            reset_storage.assert_not_called()
+
+    def test_postgres_placeholders_are_translated(self) -> None:
+        with patch.object(app, "DATABASE_URL", "postgresql://example.invalid/database"):
+            self.assertEqual(
+                app.database_query("SELECT * FROM people WHERE person_id = ?"),
+                "SELECT * FROM people WHERE person_id = %s",
+            )
+
+    def test_postgres_initialization_uses_portable_schema(self) -> None:
+        class FakeResult:
+            def __init__(self, row=None):
+                self.row = row
+
+            def fetchone(self):
+                return self.row
+
+        class FakeConnection:
+            def __init__(self):
+                self.statements = []
+                self.committed = False
+                self.closed = False
+
+            def execute(self, query, params=()):
+                self.statements.append((query, params))
+                if "recognition_model_version" in query and query.lstrip().startswith("SELECT"):
+                    return FakeResult(None)
+                if "COUNT(*) AS count FROM cameras" in query:
+                    return FakeResult({"count": 0})
+                return FakeResult()
+
+            def commit(self):
+                self.committed = True
+
+            def close(self):
+                self.closed = True
+
+        connection = FakeConnection()
+        with patch.object(app, "DATABASE_URL", "postgresql://example.invalid/database"), patch.object(
+            app, "connect", return_value=connection
+        ):
+            app.init_db()
+
+        schema_statements = "\n".join(query for query, _ in connection.statements)
+        self.assertIn("BIGSERIAL PRIMARY KEY", schema_statements)
+        self.assertNotIn("AUTOINCREMENT", schema_statements)
+        self.assertIn("VALUES(%s, %s)", schema_statements)
+        self.assertTrue(connection.committed)
+        self.assertTrue(connection.closed)
 
     def test_yunet_native_error_retries_with_fresh_detector(self) -> None:
         model_output = np.array(
