@@ -50,7 +50,7 @@ SFACE_MODEL_URL = (
 REGISTRATION_DETECTION_THRESHOLD = 0.65
 FACE_DETECTION_THRESHOLD = 0.70
 RECOGNITION_COSINE_THRESHOLD = 0.50
-VERIFICATION_COSINE_THRESHOLD = 0.42
+VERIFICATION_COSINE_THRESHOLD = 0.36
 LIVENESS_IDENTITY_THRESHOLD = 0.30
 LIVENESS_HEAD_MOVEMENT_THRESHOLD = 0.08
 RECOGNITION_MODEL_VERSION = "sface_v1"
@@ -602,15 +602,28 @@ def embedding_from_detection(
     recognizer = sface_recognizer()
     if recognizer is None:
         raise RuntimeError("The face-recognition model could not be loaded.")
+    return sface_feature(recognizer, aligned_face_from_detection(frame_bgr, detection))
+
+
+def aligned_face_from_detection(
+    frame_bgr: np.ndarray,
+    detection: dict[str, Any],
+) -> np.ndarray:
+    """Return a landmark-aligned 112x112 face for SFace inference."""
+    recognizer = sface_recognizer()
+    if recognizer is None:
+        raise RuntimeError("The face-recognition model could not be loaded.")
     geometry = detection.get("face_geometry")
     if geometry:
         with SFACE_INFERENCE_LOCK:
-            aligned_face = recognizer.alignCrop(
+            return recognizer.alignCrop(
                 frame_bgr,
                 np.asarray(geometry, dtype=np.float32),
             )
-            return sface_feature(recognizer, aligned_face)
-    return embedding(crop_face(frame_bgr, detection["box"]))
+    face = crop_face(frame_bgr, detection["box"])
+    if face.size == 0:
+        raise RuntimeError("The detected face crop was empty.")
+    return cv2.resize(face, (112, 112), interpolation=cv2.INTER_AREA)
 
 
 def registration_frame_variants(frame_bgr: np.ndarray) -> list[np.ndarray]:
@@ -681,10 +694,34 @@ def verification_similarity(
     second_frame: np.ndarray,
     second_detection: dict[str, Any],
 ) -> float:
-    """Compare landmark-aligned SFace embeddings for a verification pair."""
-    first_embedding = embedding_from_detection(first_frame, first_detection)
-    second_embedding = embedding_from_detection(second_frame, second_detection)
+    """Compare pose-tolerant, landmark-aligned SFace verification features."""
+    first_embedding = verification_embedding(first_frame, first_detection)
+    second_embedding = verification_embedding(second_frame, second_detection)
     return max(0.0, min(1.0, cosine(first_embedding, second_embedding)))
+
+
+def verification_embedding(
+    frame_bgr: np.ndarray,
+    detection: dict[str, Any],
+) -> list[float]:
+    """Average original and mirrored aligned features to reduce pose sensitivity."""
+    recognizer = sface_recognizer()
+    if recognizer is None:
+        raise RuntimeError("The face-recognition model could not be loaded.")
+    aligned_face = aligned_face_from_detection(frame_bgr, detection)
+    original = np.asarray(sface_feature(recognizer, aligned_face), dtype=np.float32)
+    mirrored = np.asarray(
+        sface_feature(recognizer, cv2.flip(aligned_face, 1)),
+        dtype=np.float32,
+    )
+    combined = original + mirrored
+    combined /= np.linalg.norm(combined) + 1e-9
+    return combined.tolist()
+
+
+def verification_match_score(similarity: float) -> float:
+    """Map raw cosine similarity to an intuitive, monotonic decision score."""
+    return float(1.0 / (1.0 + math.exp(-12.0 * (similarity - VERIFICATION_COSINE_THRESHOLD))))
 
 
 def liveness_face_state(detection: dict[str, Any]) -> dict[str, float]:
@@ -1400,8 +1437,11 @@ def verification() -> None:
             st.error(str(error))
             return
         same = similarity >= VERIFICATION_COSINE_THRESHOLD
-        st.metric("Similarity", f"{similarity:.1%}")
-        st.caption(f"Verification threshold: {VERIFICATION_COSINE_THRESHOLD:.0%} cosine similarity")
+        st.metric("Match score", f"{verification_match_score(similarity):.1%}")
+        st.caption(
+            f"Feature-based decision score, not model accuracy. Raw cosine similarity: {similarity:.3f} · "
+            f"acceptance threshold: {VERIFICATION_COSINE_THRESHOLD:.2f}"
+        )
         if same:
             st.success("Same person")
         else:

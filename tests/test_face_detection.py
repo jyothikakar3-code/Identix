@@ -111,13 +111,13 @@ class FaceDetectionTests(unittest.TestCase):
         self.assertEqual(result.person, person)
         self.assertGreater(result.confidence, 0.95)
 
-    def test_verification_uses_landmark_aligned_embeddings(self) -> None:
+    def test_verification_uses_pose_tolerant_aligned_embeddings(self) -> None:
         frame = np.zeros((120, 120, 3), dtype=np.uint8)
         first_detection = {"box": (10, 10, 80, 80), "face_geometry": [0.0] * 14}
         second_detection = {"box": (12, 10, 80, 80), "face_geometry": [0.0] * 14}
         with patch.object(
             app,
-            "embedding_from_detection",
+            "verification_embedding",
             side_effect=[[1.0, 0.0], [0.8, 0.2]],
         ) as aligned_embedding:
             similarity = app.verification_similarity(
@@ -125,6 +125,26 @@ class FaceDetectionTests(unittest.TestCase):
             )
         self.assertGreater(similarity, app.VERIFICATION_COSINE_THRESHOLD)
         self.assertEqual(aligned_embedding.call_count, 2)
+
+    def test_verification_match_score_is_feature_based_and_monotonic(self) -> None:
+        rejected_score = app.verification_match_score(0.05)
+        threshold_score = app.verification_match_score(app.VERIFICATION_COSINE_THRESHOLD)
+        strong_score = app.verification_match_score(0.70)
+        self.assertLess(rejected_score, threshold_score)
+        self.assertAlmostEqual(threshold_score, 0.50)
+        self.assertLess(threshold_score, strong_score)
+
+    def test_verification_rejects_unrelated_features(self) -> None:
+        frame = np.zeros((120, 120, 3), dtype=np.uint8)
+        detection = {"box": (10, 10, 80, 80), "face_geometry": [0.0] * 14}
+        with patch.object(
+            app,
+            "verification_embedding",
+            side_effect=[[1.0, 0.0], [0.0, 1.0]],
+        ):
+            similarity = app.verification_similarity(frame, detection, frame, detection)
+        self.assertLess(similarity, app.VERIFICATION_COSINE_THRESHOLD)
+        self.assertLess(app.verification_match_score(similarity), 0.02)
 
     def test_eye_evidence_is_capped_at_one_plausible_pair(self) -> None:
         duplicate_boxes = np.array(
