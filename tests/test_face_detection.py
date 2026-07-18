@@ -69,6 +69,46 @@ class FaceDetectionTests(unittest.TestCase):
 
 
 class ApplicationRegressionTests(unittest.TestCase):
+    def test_supabase_url_normalization_handles_copied_secret_and_password_symbols(self) -> None:
+        copied = (
+            'DATABASE_URL = "postgresql://postgres.example:p@ss%word@'
+            'aws-0-region.pooler.supabase.com:6543/postgres"'
+        )
+        self.assertEqual(
+            app.normalize_database_url(copied),
+            "postgresql://postgres.example:p%40ss%25word@aws-0-region.pooler.supabase.com:6543/postgres",
+        )
+
+    def test_invalid_cloud_connection_falls_back_without_crashing(self) -> None:
+        class FakeDatabaseError(Exception):
+            pass
+
+        class FakePsycopg:
+            Error = FakeDatabaseError
+
+            @staticmethod
+            def connect(*args, **kwargs):
+                raise FakeDatabaseError("invalid connection info")
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            with patch.object(
+                app, "DB_PATH", Path(temporary_directory) / "fallback.sqlite3"
+            ), patch.object(
+                app, "DATABASE_URL", "postgresql://invalid"
+            ), patch.object(
+                app, "DATABASE_CONNECTION_ERROR", None
+            ), patch.object(
+                app, "psycopg", FakePsycopg
+            ), patch.object(
+                app, "dict_row", object()
+            ):
+                connection = app.connect()
+                result = connection.execute("SELECT 1").fetchone()[0]
+                connection.close()
+                self.assertEqual(result, 1)
+                self.assertFalse(app.persistent_database_enabled())
+                self.assertIsNotNone(app.DATABASE_CONNECTION_ERROR)
+
     def test_reinitializing_database_never_deletes_registered_people(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_db = Path(temporary_directory) / "persistent.sqlite3"

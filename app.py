@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, unquote
 
 import altair as alt
 import cv2
@@ -32,6 +33,27 @@ except ImportError:  # SQLite remains available for local development.
     dict_row = None
 
 
+def normalize_database_url(value: str) -> str:
+    """Normalize URI text copied from Supabase or a TOML secrets line."""
+    normalized = value.strip()
+    if normalized.startswith("DATABASE_URL") and "=" in normalized:
+        normalized = normalized.split("=", 1)[1].strip()
+    if normalized.startswith("psql "):
+        normalized = normalized[5:].strip()
+    normalized = normalized.strip("'\"`").strip()
+    if "://" not in normalized or "@" not in normalized:
+        return normalized
+
+    scheme, remainder = normalized.split("://", 1)
+    user_info, server_info = remainder.rsplit("@", 1)
+    if ":" not in user_info:
+        return normalized
+    username, password = user_info.split(":", 1)
+    # Supabase passwords often contain %, @, #, or /; encode them as URI data.
+    encoded_password = quote(unquote(password), safe="")
+    return f"{scheme}://{username}:{encoded_password}@{server_info}"
+
+
 ROOT = Path(__file__).parent
 DATA = ROOT / "data"
 REGISTERED_DIR = ROOT / "storage" / "registered"
@@ -39,7 +61,8 @@ UNKNOWN_DIR = ROOT / "storage" / "unknown"
 REPORT_DIR = ROOT / "storage" / "reports"
 MODEL_DIR = ROOT / "models"
 DB_PATH = DATA / "face_system.sqlite3"
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+DATABASE_URL = normalize_database_url(os.getenv("DATABASE_URL", ""))
+DATABASE_CONNECTION_ERROR: str | None = None
 
 for folder in (DATA, REGISTERED_DIR, UNKNOWN_DIR, REPORT_DIR, MODEL_DIR):
     folder.mkdir(parents=True, exist_ok=True)
@@ -82,15 +105,24 @@ def persistent_database_enabled() -> bool:
 
 
 def connect() -> Any:
+    global DATABASE_CONNECTION_ERROR, DATABASE_URL
     if persistent_database_enabled():
         if psycopg is None or dict_row is None:
             raise RuntimeError("PostgreSQL support is not installed. Install psycopg[binary].")
-        return psycopg.connect(
-            DATABASE_URL,
-            row_factory=dict_row,
-            connect_timeout=10,
-            prepare_threshold=None,
-        )
+        try:
+            return psycopg.connect(
+                DATABASE_URL,
+                row_factory=dict_row,
+                connect_timeout=10,
+                prepare_threshold=None,
+            )
+        except Exception as error:
+            if not isinstance(error, psycopg.Error):
+                raise
+            # Never take down the presentation app because of a malformed or
+            # temporarily unreachable cloud secret. Make the fallback visible.
+            DATABASE_CONNECTION_ERROR = "Persistent database connection failed; local safe mode is active."
+            DATABASE_URL = ""
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.row_factory = sqlite3.Row
     return con
@@ -1200,6 +1232,11 @@ def login_screen() -> None:
             """,
             unsafe_allow_html=True,
         )
+        if DATABASE_CONNECTION_ERROR:
+            st.warning(
+                "The Supabase connection string needs correction. The app is running in local safe mode "
+                "so you can continue preparing your presentation."
+            )
     with right:
         with st.form("login"):
             st.subheader("Secure Login")
@@ -1710,6 +1747,11 @@ def settings_page() -> None:
     st.title("System Settings")
     if persistent_database_enabled():
         st.success("Persistent database connected. Registrations survive app updates and restarts.")
+    elif DATABASE_CONNECTION_ERROR:
+        st.error(
+            "Supabase could not connect. Local safe mode is active, so the app remains usable. "
+            "Correct DATABASE_URL in Streamlit Secrets to enable permanent storage."
+        )
     else:
         st.warning(
             "Local SQLite mode is active. It is suitable for local development, but Streamlit Cloud "
