@@ -1196,6 +1196,130 @@ def apply_theme() -> None:
             text-shadow:0 0 12px rgba(103,232,249,.45);
         }
         .pill { display:inline-block; padding:4px 10px; border-radius:999px; background:rgba(56,189,248,.16); color:var(--cyan); border:1px solid var(--line); font-weight:800; }
+        .identix-hero {
+            position:relative;
+            overflow:hidden;
+            min-height:520px;
+            padding:42px 44px;
+            border:1px solid rgba(103,232,249,.30);
+            border-radius:24px;
+            background:
+                radial-gradient(circle at 82% 18%, rgba(34,211,238,.18), transparent 30%),
+                linear-gradient(145deg, rgba(7,17,31,.97), rgba(6,29,49,.88));
+            box-shadow:0 32px 80px rgba(0,0,0,.34), 0 0 42px rgba(14,165,233,.15), inset 0 1px 0 rgba(255,255,255,.08);
+        }
+        .identix-hero::after {
+            content:"";
+            position:absolute;
+            width:220px;
+            height:220px;
+            right:-72px;
+            bottom:-78px;
+            border:1px solid rgba(103,232,249,.22);
+            border-radius:50%;
+            box-shadow:0 0 0 34px rgba(56,189,248,.035), 0 0 0 68px rgba(56,189,248,.025);
+        }
+        .identix-brand {
+            display:flex;
+            align-items:center;
+            gap:18px;
+            margin-bottom:48px;
+        }
+        .identix-logo {
+            width:76px;
+            height:76px;
+            flex:0 0 76px;
+            border-radius:22px;
+            background:linear-gradient(145deg, rgba(103,232,249,.18), rgba(14,165,233,.08));
+            border:1px solid rgba(103,232,249,.48);
+            box-shadow:0 0 32px rgba(56,189,248,.25), inset 0 0 24px rgba(56,189,248,.10);
+            display:grid;
+            place-items:center;
+        }
+        .identix-logo svg { width:54px; height:54px; filter:drop-shadow(0 0 9px rgba(103,232,249,.60)); }
+        .identix-wordmark {
+            color:#f2fbff !important;
+            font-size:2.05rem;
+            line-height:1;
+            font-weight:950;
+            letter-spacing:.16em;
+            text-transform:uppercase;
+        }
+        .identix-tagline {
+            color:var(--muted) !important;
+            font-size:.72rem;
+            font-weight:800;
+            letter-spacing:.18em;
+            text-transform:uppercase;
+            margin-top:8px;
+        }
+        .identix-kicker {
+            display:inline-flex;
+            align-items:center;
+            gap:8px;
+            color:var(--cyan) !important;
+            font-size:.78rem;
+            font-weight:900;
+            letter-spacing:.14em;
+            text-transform:uppercase;
+            margin-bottom:16px;
+        }
+        .identix-kicker::before { content:""; width:28px; height:2px; background:var(--cyan); box-shadow:0 0 12px var(--cyan); }
+        .identix-headline {
+            max-width:720px;
+            color:#f5fcff !important;
+            font-size:clamp(2.25rem, 4.2vw, 4.25rem);
+            line-height:1.02;
+            font-weight:950;
+            letter-spacing:-.045em;
+            margin:0 0 20px;
+            text-wrap:balance;
+        }
+        .identix-headline span {
+            background:linear-gradient(90deg, var(--cyan), var(--blue));
+            -webkit-background-clip:text;
+            background-clip:text;
+            color:transparent !important;
+        }
+        .identix-copy {
+            max-width:660px;
+            color:#b9dded !important;
+            font-size:1.02rem;
+            line-height:1.7;
+            margin-bottom:28px;
+        }
+        .identix-features { display:flex; flex-wrap:wrap; gap:10px; }
+        .identix-feature {
+            color:#d9f7ff !important;
+            font-size:.78rem;
+            font-weight:800;
+            padding:8px 12px;
+            border-radius:999px;
+            border:1px solid rgba(103,232,249,.24);
+            background:rgba(3,14,27,.55);
+        }
+        .identix-feature b { color:var(--ok) !important; margin-right:6px; }
+        .demo-access {
+            display:flex;
+            align-items:center;
+            justify-content:space-between;
+            gap:16px;
+            padding:13px 16px;
+            margin-top:14px;
+            border:1px solid rgba(103,232,249,.20);
+            border-radius:12px;
+            background:rgba(3,14,27,.62);
+        }
+        .demo-access-label { color:var(--muted) !important; font-size:.75rem; font-weight:800; text-transform:uppercase; letter-spacing:.08em; }
+        .demo-access-values { color:#dff9ff !important; font-size:.86rem; }
+        .login-panel-title { margin:10px 0 2px; color:#f5fcff !important; font-size:2rem; font-weight:950; }
+        .login-panel-copy { color:#9dc9dc !important; margin-bottom:20px; }
+        @media (max-width: 900px) {
+            .identix-hero { min-height:auto; padding:28px 24px; }
+            .identix-brand { margin-bottom:32px; }
+            .identix-headline { font-size:2.5rem; }
+            .demo-access { align-items:flex-start; flex-direction:column; }
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -1219,30 +1343,60 @@ def require_role(allowed: list[str]) -> bool:
 
 def login_screen() -> None:
     apply_theme()
-    left, right = st.columns([1.15, 0.85], gap="large")
+    left, right = st.columns([1.28, 0.72], gap="large", vertical_alignment="center")
     with left:
-        st.title("Face Recognition Management System")
-        st.write("A complete AI-powered attendance, access, visitor alert, and reporting workspace.")
         st.markdown(
             """
-            <div class='soft-box'>
-            <b>Default administrator:</b> username <code>admin</code>, password <code>admin123</code>.
-            Change it from Profile after login.
+            <section class="identix-hero">
+                <div class="identix-brand">
+                    <div class="identix-logo" aria-label="Identix logo">
+                        <svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                            <path d="M18 8H11a3 3 0 0 0-3 3v7M46 8h7a3 3 0 0 1 3 3v7M18 56H11a3 3 0 0 1-3-3v-7M46 56h7a3 3 0 0 0 3-3v-7" stroke="#67E8F9" stroke-width="3" stroke-linecap="round"/>
+                            <path d="M21 28c1-8 5-13 11-13s10 5 11 13" stroke="#38BDF8" stroke-width="3" stroke-linecap="round"/>
+                            <path d="M21 29v5c0 8 5 14 11 14s11-6 11-14v-5" stroke="#E5F7FF" stroke-width="3" stroke-linecap="round"/>
+                            <path d="M25 31h2M37 31h2M28 40c2.5 2 5.5 2 8 0" stroke="#67E8F9" stroke-width="2.5" stroke-linecap="round"/>
+                            <path d="M14 32h36" stroke="#0EA5E9" stroke-width="1.5" stroke-linecap="round" stroke-dasharray="3 4" opacity=".8"/>
+                        </svg>
+                    </div>
+                    <div>
+                        <div class="identix-wordmark">Identix</div>
+                        <div class="identix-tagline">Identity intelligence</div>
+                    </div>
+                </div>
+                <div class="identix-kicker">AI-powered recognition</div>
+                <h1 class="identix-headline">See the person.<br><span>Know the identity.</span></h1>
+                <p class="identix-copy">A secure command center for face recognition, attendance, access control, liveness verification, and visitor intelligence.</p>
+                <div class="identix-features">
+                    <span class="identix-feature"><b>●</b>Face intelligence</span>
+                    <span class="identix-feature"><b>●</b>Liveness checks</span>
+                    <span class="identix-feature"><b>●</b>Smart attendance</span>
+                </div>
+            </section>
+            """,
+            unsafe_allow_html=True,
+        )
+    with right:
+        st.markdown(
+            """
+            <div class="identix-kicker">Secure access</div>
+            <div class="login-panel-title">Welcome back</div>
+            <div class="login-panel-copy">Sign in to enter the Identix command center.</div>
+            """,
+            unsafe_allow_html=True,
+        )
+        with st.form("login"):
+            username = st.text_input("Username", autocomplete="username")
+            password = st.text_input("Password", type="password", autocomplete="current-password")
+            submitted = st.form_submit_button("Enter Identix", width="stretch")
+        st.markdown(
+            """
+            <div class="demo-access">
+                <span class="demo-access-label">Demo access</span>
+                <span class="demo-access-values"><code>admin</code> &nbsp;·&nbsp; <code>admin123</code></span>
             </div>
             """,
             unsafe_allow_html=True,
         )
-        if DATABASE_CONNECTION_ERROR:
-            st.warning(
-                "The Supabase connection string needs correction. The app is running in local safe mode "
-                "so you can continue preparing your presentation."
-            )
-    with right:
-        with st.form("login"):
-            st.subheader("Secure Login")
-            username = st.text_input("Username", autocomplete="username")
-            password = st.text_input("Password", type="password", autocomplete="current-password")
-            submitted = st.form_submit_button("Log in", width="stretch")
         if submitted:
             user = rows("auth_users", "WHERE username = ? AND password_hash = ?", (username, hash_password(password)))
             if user:
@@ -1829,7 +1983,7 @@ def about_page() -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title="AI Face Recognition System", page_icon="◉", layout="wide")
+    st.set_page_config(page_title="Identix | Identity Intelligence", page_icon="◈", layout="wide")
     init_db()
     apply_theme()
     if "user" not in st.session_state:
