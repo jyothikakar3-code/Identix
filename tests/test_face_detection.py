@@ -66,6 +66,35 @@ class FaceDetectionTests(unittest.TestCase):
         self.assertEqual(detections[0]["box"], (10, 20, 80, 90))
         self.assertAlmostEqual(detections[0]["confidence"], 0.91, places=2)
 
+    def test_registration_retries_a_missed_frame(self) -> None:
+        detection = {"box": (20, 20, 120, 120), "confidence": 0.72}
+        with patch.object(app, "detect_faces", side_effect=[[], [detection]]), patch.object(
+            app, "registration_face_quality", return_value=(True, "")
+        ):
+            result, note = app.detect_registration_face(np.zeros((200, 200, 3), dtype=np.uint8))
+        self.assertEqual(result, detection)
+        self.assertIn("retry", note)
+
+    def test_single_enrolled_identity_does_not_force_a_match(self) -> None:
+        person = {
+            "name": "Registered person",
+            "status": "Active",
+            "embeddings": [[1.0, 0.0], [0.98, 0.02], [0.96, 0.04]],
+        }
+        stranger_probe = [0.0, 1.0]
+        result = app.recognize_embedding(stranger_probe, [person], threshold=0.50)
+        self.assertIsNone(result.person)
+
+    def test_match_requires_multi_sample_support(self) -> None:
+        person = {
+            "name": "Registered person",
+            "status": "Active",
+            "embeddings": [[1.0, 0.0], [0.99, 0.01], [0.98, 0.02]],
+        }
+        result = app.recognize_embedding([1.0, 0.0], [person], threshold=0.50)
+        self.assertEqual(result.person, person)
+        self.assertGreater(result.confidence, 0.95)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -5,6 +5,7 @@ import csv
 import hashlib
 import io
 import json
+import math
 import os
 import shutil
 import sqlite3
@@ -40,6 +41,15 @@ YUNET_MODEL_URL = (
     "https://github.com/opencv/opencv_zoo/raw/main/models/"
     "face_detection_yunet/face_detection_yunet_2023mar.onnx"
 )
+SFACE_MODEL_PATH = MODEL_DIR / "face_recognition_sface_2021dec.onnx"
+SFACE_MODEL_URL = (
+    "https://github.com/opencv/opencv_zoo/raw/main/models/"
+    "face_recognition_sface/face_recognition_sface_2021dec.onnx"
+)
+REGISTRATION_DETECTION_THRESHOLD = 0.65
+FACE_DETECTION_THRESHOLD = 0.70
+RECOGNITION_COSINE_THRESHOLD = 0.50
+RECOGNITION_MODEL_VERSION = "sface_v1"
 
 
 @dataclass
@@ -132,7 +142,7 @@ def init_db() -> None:
         """
     )
     defaults = {
-        "recognition_threshold": "0.72",
+        "recognition_threshold": str(RECOGNITION_COSINE_THRESHOLD),
         "duplicate_minutes": "30",
         "dark_mode": "false",
         "blink_required": "true",
@@ -141,6 +151,20 @@ def init_db() -> None:
     }
     for key, value in defaults.items():
         cur.execute("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", (key, value))
+    model_version = cur.execute(
+        "SELECT value FROM settings WHERE key = 'recognition_model_version'"
+    ).fetchone()
+    if model_version is None or model_version["value"] != RECOGNITION_MODEL_VERSION:
+        cur.execute(
+            "INSERT INTO settings(key, value) VALUES('recognition_threshold', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(RECOGNITION_COSINE_THRESHOLD),),
+        )
+        cur.execute(
+            "INSERT INTO settings(key, value) VALUES('recognition_model_version', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (RECOGNITION_MODEL_VERSION,),
+        )
     cur.execute(
         """
         INSERT OR IGNORE INTO auth_users(username, password_hash, role, display_name, email, phone, created_at)
@@ -329,7 +353,7 @@ def yunet_detector() -> Any:
             str(YUNET_MODEL_PATH),
             "",
             (320, 320),
-            0.80,
+            REGISTRATION_DETECTION_THRESHOLD,
             0.30,
             5000,
         )
@@ -337,7 +361,10 @@ def yunet_detector() -> Any:
         return None
 
 
-def detect_faces_yunet(frame_bgr: np.ndarray) -> list[dict[str, Any]] | None:
+def detect_faces_yunet(
+    frame_bgr: np.ndarray,
+    confidence_threshold: float = FACE_DETECTION_THRESHOLD,
+) -> list[dict[str, Any]] | None:
     """Detect faces with YuNet; return None only when the model is unavailable."""
     detector = yunet_detector()
     if detector is None:
@@ -357,11 +384,15 @@ def detect_faces_yunet(frame_bgr: np.ndarray) -> list[dict[str, Any]] | None:
         return []
     detections = []
     for face in faces:
-        x, y, w, h = (float(value) / scale for value in face[:4])
+        if float(face[-1]) < confidence_threshold:
+            continue
+        geometry = [float(value) / scale for value in face[:14]]
+        x, y, w, h = geometry[:4]
         detections.append(
             {
                 "box": (int(x), int(y), int(w), int(h)),
                 "confidence": float(face[-1]),
+                "face_geometry": geometry,
             }
         )
     return detections
@@ -391,8 +422,11 @@ def has_eye_pair(gray: np.ndarray, box: tuple[int, int, int, int]) -> bool:
     return False
 
 
-def detect_faces(frame_bgr: np.ndarray) -> list[dict[str, Any]]:
-    yunet_detections = detect_faces_yunet(frame_bgr)
+def detect_faces(
+    frame_bgr: np.ndarray,
+    confidence_threshold: float = FACE_DETECTION_THRESHOLD,
+) -> list[dict[str, Any]]:
+    yunet_detections = detect_faces_yunet(frame_bgr, confidence_threshold)
     if yunet_detections is not None:
         return yunet_detections
 
@@ -422,7 +456,7 @@ def detect_faces(frame_bgr: np.ndarray) -> list[dict[str, Any]]:
                     x = gray.shape[1] - x - fw
                 confidence = float(1.0 / (1.0 + np.exp(-(float(feature_weight) - offset) / weight_scale)))
                 box = (int(x), int(y), int(fw), int(fh))
-                if has_eye_pair(gray, box):
+                if confidence >= confidence_threshold and has_eye_pair(gray, box):
                     detections.append({"box": box, "confidence": confidence})
 
     # Several cascades often find the same face. Keep only the strongest
@@ -453,18 +487,111 @@ def crop_face(frame_bgr: np.ndarray, box: tuple[int, int, int, int]) -> np.ndarr
     return frame_bgr[y1:y2, x1:x2]
 
 
+@st.cache_resource
+def sface_recognizer() -> Any:
+    """Load the official OpenCV SFace recognition model."""
+    if not hasattr(cv2, "FaceRecognizerSF"):
+        return None
+    if not SFACE_MODEL_PATH.is_file() or SFACE_MODEL_PATH.stat().st_size < 1_000_000:
+        temporary_path = SFACE_MODEL_PATH.with_suffix(".download")
+        try:
+            with urllib.request.urlopen(SFACE_MODEL_URL, timeout=120) as response:
+                model_bytes = response.read()
+            if len(model_bytes) < 1_000_000:
+                return None
+            temporary_path.write_bytes(model_bytes)
+            temporary_path.replace(SFACE_MODEL_PATH)
+        except (OSError, ValueError):
+            return None
+    try:
+        return cv2.FaceRecognizerSF.create(str(SFACE_MODEL_PATH), "")
+    except cv2.error:
+        return None
+
+
 def embedding(face_bgr: np.ndarray) -> list[float]:
     if face_bgr.size == 0:
         return []
-    gray = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2GRAY)
-    gray = cv2.equalizeHist(gray)
-    resized = cv2.resize(gray, (64, 64), interpolation=cv2.INTER_AREA)
-    hist = cv2.calcHist([resized], [0], None, [48], [0, 256]).flatten()
-    hist = hist / (np.linalg.norm(hist) + 1e-9)
-    small = cv2.resize(resized, (24, 24), interpolation=cv2.INTER_AREA).astype("float32").flatten()
-    small = (small - small.mean()) / (small.std() + 1e-6)
-    vec = np.concatenate([hist, small / (np.linalg.norm(small) + 1e-9)])
-    return vec.astype("float32").tolist()
+    recognizer = sface_recognizer()
+    if recognizer is None:
+        raise RuntimeError("The face-recognition model could not be loaded.")
+    normalized_face = cv2.resize(face_bgr, (112, 112), interpolation=cv2.INTER_AREA)
+    return sface_feature(recognizer, normalized_face)
+
+
+def sface_feature(recognizer: Any, aligned_face: np.ndarray) -> list[float]:
+    feature = recognizer.feature(aligned_face).reshape(-1).astype("float32")
+    feature /= np.linalg.norm(feature) + 1e-9
+    return feature.tolist()
+
+
+def embedding_from_detection(
+    frame_bgr: np.ndarray,
+    detection: dict[str, Any],
+) -> list[float]:
+    """Align a YuNet face by its landmarks before extracting SFace features."""
+    recognizer = sface_recognizer()
+    if recognizer is None:
+        raise RuntimeError("The face-recognition model could not be loaded.")
+    geometry = detection.get("face_geometry")
+    if geometry:
+        aligned_face = recognizer.alignCrop(
+            frame_bgr,
+            np.asarray(geometry, dtype=np.float32),
+        )
+        return sface_feature(recognizer, aligned_face)
+    return embedding(crop_face(frame_bgr, detection["box"]))
+
+
+def registration_frame_variants(frame_bgr: np.ndarray) -> list[np.ndarray]:
+    """Retry face detection with safe lighting/contrast corrections."""
+    lab = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2LAB)
+    lightness, channel_a, channel_b = cv2.split(lab)
+    enhanced_lightness = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(lightness)
+    contrast_frame = cv2.cvtColor(
+        cv2.merge((enhanced_lightness, channel_a, channel_b)),
+        cv2.COLOR_LAB2BGR,
+    )
+    brighter_frame = cv2.convertScaleAbs(frame_bgr, alpha=1.12, beta=12)
+    return [frame_bgr, contrast_frame, brighter_frame]
+
+
+def registration_face_quality(
+    frame_bgr: np.ndarray,
+    detection: dict[str, Any],
+) -> tuple[bool, str]:
+    """Reject frames whose detected face is too dark, bright, small, or blurred."""
+    face = crop_face(frame_bgr, detection["box"])
+    gray = cv2.cvtColor(face, cv2.COLOR_BGR2GRAY)
+    brightness = float(np.mean(gray))
+    sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    _, _, width, height = detection["box"]
+    min_frame_side = min(frame_bgr.shape[:2])
+    if min(width, height) < min_frame_side * 0.10:
+        return False, "face is too small; move closer"
+    if brightness < 30:
+        return False, "frame is too dark"
+    if brightness > 235:
+        return False, "frame is overexposed"
+    if sharpness < 20:
+        return False, "frame is blurred; hold still and retry"
+    return True, ""
+
+
+def detect_registration_face(
+    frame_bgr: np.ndarray,
+) -> tuple[dict[str, Any] | None, str]:
+    """Retry a registration frame and return one quality-approved face."""
+    for attempt, variant in enumerate(registration_frame_variants(frame_bgr)):
+        detections = detect_faces(variant, REGISTRATION_DETECTION_THRESHOLD)
+        if len(detections) > 1:
+            return None, f"expected one face, found {len(detections)}"
+        if len(detections) == 1:
+            quality_ok, reason = registration_face_quality(frame_bgr, detections[0])
+            if quality_ok:
+                return detections[0], "" if attempt == 0 else "recovered by detection retry"
+            return None, reason
+    return None, "no face found after three detection attempts"
 
 
 def cosine(a: list[float], b: list[float]) -> float:
@@ -483,22 +610,42 @@ def load_people() -> list[dict[str, Any]]:
     return people
 
 
-def recognize(face_bgr: np.ndarray) -> MatchResult:
-    probe = embedding(face_bgr)
-    threshold = setting("recognition_threshold", float)
+def recognize_embedding(
+    probe: list[float],
+    people: list[dict[str, Any]],
+    threshold: float,
+) -> MatchResult:
+    """Accept only identities supported by several compatible embeddings."""
     best_person = None
     best_score = -1.0
-    for person in load_people():
+    for person in people:
         if person["status"] != "Active":
             continue
-        scores = [cosine(probe, item) for item in person["embeddings"]]
-        if scores and max(scores) > best_score:
-            best_score = max(scores)
+        compatible_embeddings = [item for item in person["embeddings"] if len(item) == len(probe)]
+        scores = sorted(
+            (cosine(probe, item) for item in compatible_embeddings),
+            reverse=True,
+        )
+        # Averaging the best three samples prevents one accidental nearest
+        # neighbor from forcing a match when only one identity is enrolled.
+        support_count = min(3, len(scores))
+        person_score = float(np.mean(scores[:support_count])) if support_count else -1.0
+        if person_score > best_score:
+            best_score = person_score
             best_person = person
-    confidence = max(0.0, min(1.0, (best_score + 1) / 2))
-    if best_person and confidence >= threshold:
-        return MatchResult(best_person, confidence, 1 - confidence)
-    return MatchResult(None, confidence, 1 - confidence)
+    similarity = max(0.0, min(1.0, best_score))
+    if best_person and best_score >= threshold:
+        return MatchResult(best_person, similarity, 1 - similarity)
+    return MatchResult(None, similarity, 1 - similarity)
+
+
+def recognize(frame_bgr: np.ndarray, detection: dict[str, Any]) -> MatchResult:
+    probe = embedding_from_detection(frame_bgr, detection)
+    return recognize_embedding(
+        probe,
+        load_people(),
+        setting("recognition_threshold", float),
+    )
 
 
 def draw_boxes(frame_bgr: np.ndarray, detections: list[dict[str, Any]], labels: list[str] | None = None) -> Image.Image:
@@ -506,7 +653,8 @@ def draw_boxes(frame_bgr: np.ndarray, detections: list[dict[str, Any]], labels: 
     for idx, detection in enumerate(detections):
         x, y, w, h = detection["box"]
         label = labels[idx] if labels and idx < len(labels) else f"Face {detection['confidence']:.0%}"
-        color = (32, 201, 151) if labels and "Unknown" not in label and "Spoof" not in label else (0, 86, 255)
+        rejected = any(term in label for term in ("Unknown", "Not registered", "Spoof"))
+        color = (32, 201, 151) if labels and not rejected else (0, 86, 255)
         cv2.rectangle(output, (x, y), (x + w, y + h), color, 3)
         cv2.rectangle(output, (x, max(0, y - 30)), (x + min(w + 90, 420), y), color, -1)
         cv2.putText(output, label[:46], (x + 8, max(20, y - 9)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
@@ -913,6 +1061,7 @@ def face_registration() -> None:
         status = c3.selectbox("Status", ["Active", "Inactive"])
         uploads = st.file_uploader("Upload multiple clear face images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
         camera_sample = st.camera_input("Optional webcam sample")
+        replace_existing = st.checkbox("Replace an existing registration with this ID")
         submitted = st.form_submit_button("Register Face", width="stretch")
     if submitted:
         errors = []
@@ -927,34 +1076,62 @@ def face_registration() -> None:
             files.append(camera_sample)
         if len(files) < 2:
             errors.append("Provide at least two face images for a stronger registration.")
-        if rows("people", "WHERE person_id = ?", (person_id,)):
-            errors.append("This ID is already registered.")
+        existing_person = rows("people", "WHERE person_id = ?", (person_id,))
+        if existing_person and not replace_existing:
+            errors.append("This ID is already registered. Select replacement to enroll it again.")
         if errors:
             for error in errors:
                 st.error(error)
             return
+        accepted_samples = []
+        failed_samples = []
+        for index, file in enumerate(files):
+            frame = uploaded_to_bgr(file)
+            detection, reason = detect_registration_face(frame)
+            if detection is None:
+                failed_samples.append(index + 1)
+                st.warning(f"Retry sample {index + 1}: {reason}.")
+                continue
+            face = crop_face(frame, detection["box"])
+            try:
+                sample_embedding = embedding_from_detection(frame, detection)
+            except RuntimeError as error:
+                st.error(str(error))
+                return
+            accepted_samples.append((index + 1, face, sample_embedding))
+
+        required_samples = max(2, math.ceil(len(files) * 0.90))
+        if len(accepted_samples) < required_samples:
+            retry_list = ", ".join(str(number) for number in failed_samples)
+            st.error(
+                f"Registration paused: {len(accepted_samples)}/{len(files)} usable samples. "
+                f"Retake samples {retry_list}; at least {required_samples} are required."
+            )
+            return
+
         person_dir = REGISTERED_DIR / person_id
         person_dir.mkdir(parents=True, exist_ok=True)
         embs, image_paths = [], []
-        for index, file in enumerate(files):
-            frame = uploaded_to_bgr(file)
-            faces = detect_faces(frame)
-            if len(faces) != 1:
-                st.warning(f"Skipped sample {index + 1}: expected one face, found {len(faces)}.")
-                continue
-            face = crop_face(frame, faces[0]["box"])
-            embs.append(embedding(face))
-            image_paths.append(save_bgr(face, person_dir, f"sample_{index + 1}"))
-        if len(embs) < 2:
-            st.error("Registration failed. At least two usable face samples are required.")
-            return
-        execute(
-            """
-            INSERT INTO people(person_id, name, email, phone, department, embeddings, image_paths, status, created_at, updated_at)
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (person_id, name, email, phone, department, json.dumps(embs), json.dumps(image_paths), status, now_iso(), now_iso()),
-        )
+        for sample_number, face, sample_embedding in accepted_samples:
+            embs.append(sample_embedding)
+            image_paths.append(save_bgr(face, person_dir, f"sample_{sample_number}"))
+
+        if existing_person:
+            execute(
+                """
+                UPDATE people SET name=?, email=?, phone=?, department=?, embeddings=?, image_paths=?, status=?, updated_at=?
+                WHERE person_id=?
+                """,
+                (name, email, phone, department, json.dumps(embs), json.dumps(image_paths), status, now_iso(), person_id),
+            )
+        else:
+            execute(
+                """
+                INSERT INTO people(person_id, name, email, phone, department, embeddings, image_paths, status, created_at, updated_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (person_id, name, email, phone, department, json.dumps(embs), json.dumps(image_paths), status, now_iso(), now_iso()),
+            )
         log("Face registration", f"{name} ({person_id})")
         st.success(f"Registration successful for {name}. Stored {len(embs)} face embeddings.")
 
@@ -968,7 +1145,11 @@ def process_recognition_frame(frame: np.ndarray, camera_name: str, mark: bool) -
         return
     for detection in detections:
         face = crop_face(frame, detection["box"])
-        match = recognize(face)
+        try:
+            match = recognize(frame, detection)
+        except RuntimeError as error:
+            st.error(str(error))
+            return
         if match.person:
             person = match.person
             labels.append(f"{person['name']} · {match.confidence:.0%}")
@@ -985,12 +1166,12 @@ def process_recognition_frame(frame: np.ndarray, camera_name: str, mark: bool) -
                 }
             )
         else:
-            labels.append(f"Unknown · {match.confidence:.0%}")
+            labels.append("Not registered")
             register_unknown(face, detection["confidence"], camera_name)
-            records.append({"Name": "Unknown", "ID": "-", "Department": "-", "Recognition Confidence": f"{match.confidence:.1%}", "Attendance": "Unknown alert saved"})
+            records.append({"Name": "Not registered", "ID": "-", "Department": "-", "Recognition Confidence": f"{match.confidence:.1%}", "Attendance": "Unknown alert saved"})
     st.image(draw_boxes(frame, detections, labels), width="stretch")
-    if any(r["Name"] == "Unknown" for r in records):
-        st.markdown("<div class='alert-box'><b>Unknown person detected.</b> Alert image and timestamp were saved.</div>", unsafe_allow_html=True)
+    if any(r["Name"] == "Not registered" for r in records):
+        st.warning("This person has never registered before. Kindly register first.")
     st.dataframe(pd.DataFrame(records), width="stretch", hide_index=True)
 
 
@@ -1020,7 +1201,7 @@ def verification() -> None:
                 st.error(f"Image {idx + 1} must contain exactly one detectable face. Found {len(detections)}.")
                 return
             faces.append(crop_face(frame, detections[0]["box"]))
-        similarity = (cosine(embedding(faces[0]), embedding(faces[1])) + 1) / 2
+        similarity = max(0.0, cosine(embedding(faces[0]), embedding(faces[1])))
         same = similarity >= setting("recognition_threshold", float)
         st.metric("Similarity", f"{similarity:.1%}")
         if same:
@@ -1266,7 +1447,7 @@ def settings_page() -> None:
         return
     st.title("System Settings")
     with st.form("settings"):
-        threshold = st.slider("Recognition confidence threshold", 0.50, 0.95, setting("recognition_threshold", float), 0.01)
+        threshold = st.slider("Recognition cosine threshold", 0.30, 0.80, setting("recognition_threshold", float), 0.01)
         duplicate = st.number_input("Duplicate attendance prevention interval (minutes)", 1, 480, setting("duplicate_minutes", int))
         fps = st.number_input("Target FPS indicator", 1, 60, setting("camera_fps_target", int))
         blink = st.toggle("Require blink evidence for liveness", value=setting("blink_required", bool))

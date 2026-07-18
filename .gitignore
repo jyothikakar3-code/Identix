@@ -5,3 +5,4 @@ __pycache__/
 .streamlit/secrets.toml
 AI_Face_Recognition_App.zip
 app.py.backup_*
+models/*.onnx
