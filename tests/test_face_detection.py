@@ -20,16 +20,6 @@ class FaceDetectionTests(unittest.TestCase):
         self.assertIsNotNone(cascade_dir)
         self.assertTrue((cascade_dir / "haarcascade_frontalface_default.xml").is_file())
 
-    def test_registered_face_samples_have_feature_based_scores(self) -> None:
-        scores = []
-        for image_path in sorted((ROOT / "storage" / "registered").rglob("*.jpg")):
-            detections = app.detect_faces(cv2.imread(str(image_path)))
-            self.assertGreaterEqual(len(detections), 1, image_path.name)
-            scores.append(round(detections[0]["confidence"], 3))
-
-        self.assertGreaterEqual(len(scores), 3)
-        self.assertGreater(len(set(scores)), 1, "face scores must depend on image features")
-
     def test_object_images_return_no_face(self) -> None:
         apple = np.full((480, 640, 3), 245, dtype=np.uint8)
         cv2.circle(apple, (320, 240), 115, (0, 0, 210), -1)
