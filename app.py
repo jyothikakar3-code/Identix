@@ -9,6 +9,7 @@ import math
 import os
 import shutil
 import sqlite3
+import threading
 import time
 import urllib.request
 from dataclasses import dataclass
@@ -50,6 +51,8 @@ REGISTRATION_DETECTION_THRESHOLD = 0.65
 FACE_DETECTION_THRESHOLD = 0.70
 RECOGNITION_COSINE_THRESHOLD = 0.50
 RECOGNITION_MODEL_VERSION = "sface_v1"
+YUNET_INFERENCE_LOCK = threading.RLock()
+SFACE_INFERENCE_LOCK = threading.RLock()
 
 
 @dataclass
@@ -349,16 +352,26 @@ def yunet_detector() -> Any:
         except (OSError, ValueError):
             return None
     try:
-        return cv2.FaceDetectorYN.create(
-            str(YUNET_MODEL_PATH),
-            "",
-            (320, 320),
-            REGISTRATION_DETECTION_THRESHOLD,
-            0.30,
-            5000,
-        )
+        return create_yunet_detector()
     except cv2.error:
         return None
+
+
+def create_yunet_detector() -> Any:
+    return cv2.FaceDetectorYN.create(
+        str(YUNET_MODEL_PATH),
+        "",
+        (320, 320),
+        REGISTRATION_DETECTION_THRESHOLD,
+        0.30,
+        5000,
+    )
+
+
+def run_yunet_inference(detector: Any, frame_bgr: np.ndarray) -> Any:
+    height, width = frame_bgr.shape[:2]
+    detector.setInputSize((width, height))
+    return detector.detect(frame_bgr)[1]
 
 
 def detect_faces_yunet(
@@ -377,9 +390,17 @@ def detect_faces_yunet(
         inference_frame = cv2.resize(frame_bgr, (int(width * scale), int(height * scale)), interpolation=cv2.INTER_AREA)
     else:
         inference_frame = frame_bgr
-    inference_height, inference_width = inference_frame.shape[:2]
-    detector.setInputSize((inference_width, inference_height))
-    _, faces = detector.detect(inference_frame)
+    # FaceDetectorYN.setInputSize mutates the cached detector. Serialize that
+    # mutation and inference so Streamlit sessions cannot race each other.
+    with YUNET_INFERENCE_LOCK:
+        try:
+            faces = run_yunet_inference(detector, inference_frame)
+        except cv2.error:
+            # Recover from a damaged/mismatched cached native object once.
+            try:
+                faces = run_yunet_inference(create_yunet_detector(), inference_frame)
+            except cv2.error:
+                return None
     if faces is None:
         return []
     detections = []
@@ -520,7 +541,8 @@ def embedding(face_bgr: np.ndarray) -> list[float]:
 
 
 def sface_feature(recognizer: Any, aligned_face: np.ndarray) -> list[float]:
-    feature = recognizer.feature(aligned_face).reshape(-1).astype("float32")
+    with SFACE_INFERENCE_LOCK:
+        feature = recognizer.feature(aligned_face).reshape(-1).astype("float32")
     feature /= np.linalg.norm(feature) + 1e-9
     return feature.tolist()
 
@@ -535,11 +557,12 @@ def embedding_from_detection(
         raise RuntimeError("The face-recognition model could not be loaded.")
     geometry = detection.get("face_geometry")
     if geometry:
-        aligned_face = recognizer.alignCrop(
-            frame_bgr,
-            np.asarray(geometry, dtype=np.float32),
-        )
-        return sface_feature(recognizer, aligned_face)
+        with SFACE_INFERENCE_LOCK:
+            aligned_face = recognizer.alignCrop(
+                frame_bgr,
+                np.asarray(geometry, dtype=np.float32),
+            )
+            return sface_feature(recognizer, aligned_face)
     return embedding(crop_face(frame_bgr, detection["box"]))
 
 
@@ -583,7 +606,10 @@ def detect_registration_face(
 ) -> tuple[dict[str, Any] | None, str]:
     """Retry a registration frame and return one quality-approved face."""
     for attempt, variant in enumerate(registration_frame_variants(frame_bgr)):
-        detections = detect_faces(variant, REGISTRATION_DETECTION_THRESHOLD)
+        try:
+            detections = detect_faces(variant, REGISTRATION_DETECTION_THRESHOLD)
+        except cv2.error:
+            continue
         if len(detections) > 1:
             return None, f"expected one face, found {len(detections)}"
         if len(detections) == 1:

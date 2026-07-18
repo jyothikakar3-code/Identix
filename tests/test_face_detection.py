@@ -66,6 +66,22 @@ class FaceDetectionTests(unittest.TestCase):
         self.assertEqual(detections[0]["box"], (10, 20, 80, 90))
         self.assertAlmostEqual(detections[0]["confidence"], 0.91, places=2)
 
+    def test_yunet_native_error_retries_with_fresh_detector(self) -> None:
+        model_output = np.array(
+            [[10, 20, 80, 90, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.91]],
+            dtype=np.float32,
+        )
+        broken_detector = unittest.mock.Mock()
+        broken_detector.detect.side_effect = cv2.error("native detector failure")
+        fresh_detector = unittest.mock.Mock()
+        fresh_detector.detect.return_value = (None, model_output)
+        with patch.object(app, "yunet_detector", return_value=broken_detector), patch.object(
+            app, "create_yunet_detector", return_value=fresh_detector
+        ):
+            detections = app.detect_faces_yunet(np.zeros((200, 200, 3), dtype=np.uint8))
+        self.assertEqual(len(detections), 1)
+        fresh_detector.detect.assert_called_once()
+
     def test_registration_retries_a_missed_frame(self) -> None:
         detection = {"box": (20, 20, 120, 120), "confidence": 0.72}
         with patch.object(app, "detect_faces", side_effect=[[], [detection]]), patch.object(
