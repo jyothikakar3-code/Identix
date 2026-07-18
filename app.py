@@ -50,6 +50,9 @@ SFACE_MODEL_URL = (
 REGISTRATION_DETECTION_THRESHOLD = 0.65
 FACE_DETECTION_THRESHOLD = 0.70
 RECOGNITION_COSINE_THRESHOLD = 0.50
+VERIFICATION_COSINE_THRESHOLD = 0.42
+LIVENESS_IDENTITY_THRESHOLD = 0.30
+LIVENESS_HEAD_MOVEMENT_THRESHOLD = 0.08
 RECOGNITION_MODEL_VERSION = "sface_v1"
 YUNET_INFERENCE_LOCK = threading.RLock()
 SFACE_INFERENCE_LOCK = threading.RLock()
@@ -443,6 +446,50 @@ def has_eye_pair(gray: np.ndarray, box: tuple[int, int, int, int]) -> bool:
     return False
 
 
+def plausible_eye_count(
+    eyes: Any,
+    face_width: int,
+    face_height: int,
+) -> int:
+    """Convert noisy Haar eye boxes into zero, one, or one plausible pair."""
+    centers = [
+        (float(ex) + float(ew) / 2, float(ey) + float(eh) / 2)
+        for ex, ey, ew, eh in eyes
+    ]
+    for index, first in enumerate(centers):
+        for second in centers[index + 1 :]:
+            horizontal_gap = abs(first[0] - second[0])
+            vertical_gap = abs(first[1] - second[1])
+            if horizontal_gap >= face_width * 0.18 and vertical_gap <= face_height * 0.25:
+                return 2
+    return 1 if centers else 0
+
+
+def count_visible_eyes(
+    gray: np.ndarray,
+    box: tuple[int, int, int, int],
+) -> int:
+    """Count plausible visible eyes only inside the detected upper-face ROI."""
+    _, eye_detector = cascades()
+    if eye_detector is None:
+        raise RuntimeError("The eye detector could not be loaded.")
+    x, y, w, h = box
+    x1, y1 = max(0, x), max(0, y)
+    x2 = min(gray.shape[1], x + w)
+    y2 = min(gray.shape[0], y + int(h * 0.68))
+    upper_face = cv2.equalizeHist(gray[y1:y2, x1:x2])
+    if upper_face.size == 0:
+        return 0
+    min_eye = max(10, min(w, h) // 10)
+    eyes = eye_detector.detectMultiScale(
+        upper_face,
+        scaleFactor=1.05,
+        minNeighbors=4,
+        minSize=(min_eye, min_eye),
+    )
+    return plausible_eye_count(eyes, w, h)
+
+
 def detect_faces(
     frame_bgr: np.ndarray,
     confidence_threshold: float = FACE_DETECTION_THRESHOLD,
@@ -626,6 +673,118 @@ def cosine(a: list[float], b: list[float]) -> float:
     if av.size == 0 or bv.size == 0:
         return 0.0
     return float(np.dot(av, bv) / ((np.linalg.norm(av) * np.linalg.norm(bv)) + 1e-9))
+
+
+def verification_similarity(
+    first_frame: np.ndarray,
+    first_detection: dict[str, Any],
+    second_frame: np.ndarray,
+    second_detection: dict[str, Any],
+) -> float:
+    """Compare landmark-aligned SFace embeddings for a verification pair."""
+    first_embedding = embedding_from_detection(first_frame, first_detection)
+    second_embedding = embedding_from_detection(second_frame, second_detection)
+    return max(0.0, min(1.0, cosine(first_embedding, second_embedding)))
+
+
+def liveness_face_state(detection: dict[str, Any]) -> dict[str, float]:
+    """Extract translation and landmark-based turn evidence from one face."""
+    x, _, width, _ = detection["box"]
+    geometry = detection.get("face_geometry")
+    yaw = 0.0
+    if geometry and len(geometry) >= 10:
+        eye_midpoint_x = (float(geometry[4]) + float(geometry[6])) / 2
+        nose_x = float(geometry[8])
+        yaw = (nose_x - eye_midpoint_x) / max(1.0, float(width))
+    return {
+        "center_x": float(x) + float(width) / 2,
+        "width": max(1.0, float(width)),
+        "yaw": yaw,
+    }
+
+
+def evaluate_liveness_evidence(
+    eye_counts: list[int],
+    first_state: dict[str, float],
+    last_state: dict[str, float],
+    identity_similarities: list[float],
+    blink_required: bool = True,
+    movement_required: bool = True,
+) -> dict[str, Any]:
+    """Evaluate the ordered neutral, blink, turn-head challenge."""
+    blink_ok = len(eye_counts) == 3 and eye_counts[0] == 2 and eye_counts[1] <= 1
+    center_shift = abs(first_state["center_x"] - last_state["center_x"]) / first_state["width"]
+    yaw_shift = abs(first_state["yaw"] - last_state["yaw"])
+    movement = max(center_shift, yaw_shift)
+    move_ok = movement >= LIVENESS_HEAD_MOVEMENT_THRESHOLD
+    identity_score = min(identity_similarities) if identity_similarities else 0.0
+    identity_ok = identity_score >= LIVENESS_IDENTITY_THRESHOLD
+    live = identity_ok and (blink_ok or not blink_required) and (move_ok or not movement_required)
+
+    if not identity_ok:
+        reason = "The same face was not present in all three frames."
+    elif blink_required and not blink_ok:
+        reason = "Blink not confirmed: capture neutral first, blink second, then turn."
+    elif movement_required and not move_ok:
+        reason = "Head turn was too small; turn slightly farther for the third frame."
+    else:
+        reason = "Ordered blink, head turn, and same-face checks passed."
+    return {
+        "live": live,
+        "reason": reason,
+        "blink_ok": blink_ok,
+        "move_ok": move_ok,
+        "movement": movement,
+        "identity_ok": identity_ok,
+        "identity_score": identity_score,
+        "eye_counts": eye_counts,
+    }
+
+
+def analyze_liveness_frames(
+    frames: list[np.ndarray],
+    blink_required: bool = True,
+    movement_required: bool = True,
+) -> dict[str, Any]:
+    """Run face, eye, movement, and identity checks over three ordered frames."""
+    if len(frames) != 3:
+        return {"live": False, "reason": "Exactly three liveness frames are required."}
+
+    detections = []
+    eye_counts = []
+    embeddings = []
+    for index, frame in enumerate(frames):
+        try:
+            frame_detections = detect_faces(frame, REGISTRATION_DETECTION_THRESHOLD)
+        except (RuntimeError, cv2.error) as error:
+            return {"live": False, "reason": str(error)}
+        if len(frame_detections) != 1:
+            return {
+                "live": False,
+                "reason": f"Frame {index + 1} must contain exactly one face; found {len(frame_detections)}.",
+            }
+        detection = frame_detections[0]
+        try:
+            eye_counts.append(
+                count_visible_eyes(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), detection["box"])
+            )
+            embeddings.append(embedding_from_detection(frame, detection))
+        except (RuntimeError, cv2.error) as error:
+            return {"live": False, "reason": str(error)}
+        detections.append(detection)
+
+    identity_similarities = [
+        cosine(embeddings[0], embeddings[1]),
+        cosine(embeddings[0], embeddings[2]),
+    ]
+    return evaluate_liveness_evidence(
+        eye_counts,
+        liveness_face_state(detections[0]),
+        liveness_face_state(detections[2]),
+        identity_similarities,
+        blink_required,
+        movement_required,
+    )
 
 
 def load_people() -> list[dict[str, Any]]:
@@ -1221,15 +1380,28 @@ def verification() -> None:
     if first and second:
         frames = [uploaded_to_bgr(first), uploaded_to_bgr(second)]
         faces = []
+        detections_by_frame = []
         for idx, frame in enumerate(frames):
-            detections = detect_faces(frame)
+            try:
+                detections = detect_faces(frame)
+            except RuntimeError as error:
+                st.error(str(error))
+                return
             if len(detections) != 1:
                 st.error(f"Image {idx + 1} must contain exactly one detectable face. Found {len(detections)}.")
                 return
+            detections_by_frame.append(detections[0])
             faces.append(crop_face(frame, detections[0]["box"]))
-        similarity = max(0.0, cosine(embedding(faces[0]), embedding(faces[1])))
-        same = similarity >= setting("recognition_threshold", float)
+        try:
+            similarity = verification_similarity(
+                frames[0], detections_by_frame[0], frames[1], detections_by_frame[1]
+            )
+        except RuntimeError as error:
+            st.error(str(error))
+            return
+        same = similarity >= VERIFICATION_COSINE_THRESHOLD
         st.metric("Similarity", f"{similarity:.1%}")
+        st.caption(f"Verification threshold: {VERIFICATION_COSINE_THRESHOLD:.0%} cosine similarity")
         if same:
             st.success("Same person")
         else:
@@ -1251,33 +1423,24 @@ def liveness() -> None:
         cols[i].image(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)), caption=f"Frame {i + 1}", width="stretch")
     if st.button("Run liveness verification", disabled=len(st.session_state.live_frames) < 3, width="stretch"):
         latest = st.session_state.live_frames[-3:]
-        face_cascade, eye_cascade = cascades()
-        if face_cascade is None:
-            st.error("The human-face detector could not be loaded.")
-            return
-        centers, eye_counts = [], []
-        for frame in latest:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            faces = face_cascade.detectMultiScale(gray, 1.08, 5, minSize=(64, 64))
-            if len(faces) != 1:
-                st.error("Spoof Detected: every liveness frame must contain exactly one face.")
-                return
-            x, y, w, h = faces[0]
-            if eye_cascade is not None:
-                roi = gray[y : y + h // 2, x : x + w]
-                eyes = eye_cascade.detectMultiScale(roi, 1.08, 4, minSize=(18, 18))
-            else:
-                eyes = []
-            centers.append((x + w / 2, y + h / 2, w))
-            eye_counts.append(len(eyes))
-        movement = abs(centers[0][0] - centers[-1][0]) / max(1, centers[0][2])
-        blink_ok = min(eye_counts) < max(eye_counts) if eye_cascade is not None else False
-        move_ok = movement > 0.08
-        if (blink_ok or not setting("blink_required", bool)) and (move_ok or not setting("head_movement_required", bool)):
+        result = analyze_liveness_frames(
+            latest,
+            setting("blink_required", bool),
+            setting("head_movement_required", bool),
+        )
+        if result["live"]:
             st.success("Live Person")
         else:
-            st.error("Spoof Detected")
-        st.write({"Blink evidence": blink_ok, "Head movement": f"{movement:.1%}", "Eye detections": eye_counts})
+            st.error(f"Liveness not verified: {result['reason']}")
+        if "eye_counts" in result:
+            st.write(
+                {
+                    "Blink evidence": result["blink_ok"],
+                    "Head movement": f"{result['movement']:.1%}",
+                    "Eye detections": result["eye_counts"],
+                    "Same-face consistency": f"{result['identity_score']:.1%}",
+                }
+            )
     if st.button("Reset liveness frames"):
         st.session_state.live_frames = []
         st.rerun()

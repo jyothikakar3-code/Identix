@@ -111,6 +111,76 @@ class FaceDetectionTests(unittest.TestCase):
         self.assertEqual(result.person, person)
         self.assertGreater(result.confidence, 0.95)
 
+    def test_verification_uses_landmark_aligned_embeddings(self) -> None:
+        frame = np.zeros((120, 120, 3), dtype=np.uint8)
+        first_detection = {"box": (10, 10, 80, 80), "face_geometry": [0.0] * 14}
+        second_detection = {"box": (12, 10, 80, 80), "face_geometry": [0.0] * 14}
+        with patch.object(
+            app,
+            "embedding_from_detection",
+            side_effect=[[1.0, 0.0], [0.8, 0.2]],
+        ) as aligned_embedding:
+            similarity = app.verification_similarity(
+                frame, first_detection, frame, second_detection
+            )
+        self.assertGreater(similarity, app.VERIFICATION_COSINE_THRESHOLD)
+        self.assertEqual(aligned_embedding.call_count, 2)
+
+    def test_eye_evidence_is_capped_at_one_plausible_pair(self) -> None:
+        duplicate_boxes = np.array(
+            [[10, 10, 20, 20], [12, 11, 20, 20], [70, 10, 20, 20], [72, 11, 20, 20]]
+        )
+        self.assertEqual(app.plausible_eye_count(duplicate_boxes, 100, 100), 2)
+
+    def test_liveness_requires_blink_in_the_second_frame(self) -> None:
+        first_state = {"center_x": 100.0, "width": 100.0, "yaw": 0.0}
+        last_state = {"center_x": 112.0, "width": 100.0, "yaw": 0.10}
+        result = app.evaluate_liveness_evidence(
+            [0, 2, 2], first_state, last_state, [0.80, 0.70]
+        )
+        self.assertFalse(result["live"])
+        self.assertFalse(result["blink_ok"])
+
+    def test_liveness_accepts_ordered_same_face_session(self) -> None:
+        first_state = {"center_x": 100.0, "width": 100.0, "yaw": 0.0}
+        last_state = {"center_x": 112.0, "width": 100.0, "yaw": 0.10}
+        result = app.evaluate_liveness_evidence(
+            [2, 0, 2], first_state, last_state, [0.80, 0.70]
+        )
+        self.assertTrue(result["live"])
+        self.assertTrue(result["blink_ok"])
+        self.assertTrue(result["move_ok"])
+
+    def test_liveness_rejects_different_faces_across_frames(self) -> None:
+        first_state = {"center_x": 100.0, "width": 100.0, "yaw": 0.0}
+        last_state = {"center_x": 112.0, "width": 100.0, "yaw": 0.10}
+        result = app.evaluate_liveness_evidence(
+            [2, 0, 2], first_state, last_state, [0.80, 0.10]
+        )
+        self.assertFalse(result["live"])
+        self.assertFalse(result["identity_ok"])
+
+    def test_liveness_pipeline_detects_each_face_before_feature_checks(self) -> None:
+        frames = [np.zeros((160, 160, 3), dtype=np.uint8) for _ in range(3)]
+        detections = [
+            {"box": (20, 20, 100, 100), "face_geometry": [20, 20, 100, 100, 50, 55, 90, 55, 70, 75, 0, 0, 0, 0]},
+            {"box": (20, 20, 100, 100), "face_geometry": [20, 20, 100, 100, 50, 55, 90, 55, 70, 75, 0, 0, 0, 0]},
+            {"box": (30, 20, 100, 100), "face_geometry": [30, 20, 100, 100, 60, 55, 100, 55, 85, 75, 0, 0, 0, 0]},
+        ]
+        with patch.object(
+            app, "detect_faces", side_effect=[[item] for item in detections]
+        ) as face_detector, patch.object(
+            app, "count_visible_eyes", side_effect=[2, 0, 2]
+        ), patch.object(
+            app, "embedding_from_detection", return_value=[1.0, 0.0]
+        ):
+            result = app.analyze_liveness_frames(frames)
+        self.assertTrue(result["live"])
+        self.assertEqual(face_detector.call_count, 3)
+        self.assertTrue(
+            all(call.args[1] == app.REGISTRATION_DETECTION_THRESHOLD for call in face_detector.call_args_list)
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
