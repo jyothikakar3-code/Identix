@@ -69,6 +69,39 @@ class FaceDetectionTests(unittest.TestCase):
 
 
 class ApplicationRegressionTests(unittest.TestCase):
+    def test_clear_unknown_alerts_removes_only_alert_data(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            unknown_directory = temporary_root / "unknown"
+            registered_directory = temporary_root / "registered"
+            unknown_directory.mkdir()
+            registered_directory.mkdir()
+            alert_image = unknown_directory / "unknown_test.jpg"
+            registered_image = registered_directory / "registered_test.jpg"
+            alert_image.write_bytes(b"alert")
+            registered_image.write_bytes(b"registered")
+
+            with patch.object(app, "DB_PATH", temporary_root / "privacy.sqlite3"), patch.object(
+                app, "DATABASE_URL", ""
+            ), patch.object(app, "UNKNOWN_DIR", unknown_directory), patch.object(
+                app, "REGISTERED_DIR", registered_directory
+            ):
+                app.init_db()
+                app.execute(
+                    "INSERT INTO unknown_visitors(image_path, confidence, detected_at, camera, note) "
+                    "VALUES(?, ?, ?, ?, ?)",
+                    (str(alert_image), 0.42, app.now_iso(), "Test", "Privacy test"),
+                )
+                users_before = len(app.rows("auth_users"))
+
+                deleted = app.clear_unknown_alerts_data()
+
+                self.assertEqual(deleted, 1)
+                self.assertEqual(app.rows("unknown_visitors"), [])
+                self.assertFalse(alert_image.exists())
+                self.assertTrue(registered_image.exists())
+                self.assertEqual(len(app.rows("auth_users")), users_before)
+
     def test_supabase_url_normalization_handles_copied_secret_and_password_symbols(self) -> None:
         copied = (
             'DATABASE_URL = "postgresql://postgres.example:p@ss%word@'

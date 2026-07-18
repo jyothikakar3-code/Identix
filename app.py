@@ -279,6 +279,25 @@ def reset_storage_files() -> None:
         folder.mkdir(parents=True, exist_ok=True)
 
 
+def clear_unknown_alerts_data() -> int:
+    """Delete unknown-alert records and their stored images only."""
+    if UNKNOWN_DIR.exists():
+        for path in UNKNOWN_DIR.iterdir():
+            if path.name == ".gitkeep":
+                continue
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink(missing_ok=True)
+
+    con = connect()
+    count = int(database_execute(con, "SELECT COUNT(*) AS count FROM unknown_visitors").fetchone()["count"])
+    database_execute(con, "DELETE FROM unknown_visitors")
+    con.commit()
+    con.close()
+    return count
+
+
 def reset_operational_data() -> None:
     reset_storage_files()
     con = connect()
@@ -1755,6 +1774,20 @@ def unknown_alerts() -> None:
     if df.empty:
         st.info("No unknown visitor alerts yet.")
         return
+    if st.session_state["user"]["role"] == "Administrator":
+        with st.expander("Privacy controls"):
+            st.caption("Permanently delete every unknown-alert image and its log entry. Registered people and attendance are preserved.")
+            confirmed = st.checkbox("I understand these unknown-alert images cannot be recovered.")
+            if st.button(
+                "Delete all unknown alerts",
+                type="primary",
+                disabled=not confirmed,
+                width="stretch",
+            ):
+                deleted = clear_unknown_alerts_data()
+                log("Unknown alerts cleared", f"Deleted {deleted} unknown alert record(s)")
+                st.success(f"Deleted {deleted} unknown alert record(s) and all stored alert images.")
+                st.rerun()
     search = st.text_input("Search alerts")
     if search:
         df = df[df.apply(lambda r: search.lower() in " ".join(map(str, r.values)).lower(), axis=1)]
