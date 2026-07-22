@@ -166,8 +166,18 @@ def decode_embedding(raw: str) -> np.ndarray:
     return np.array(json.loads(raw), dtype="float32")
 
 
-def add_registered_user(data: dict[str, str], embedding: np.ndarray, samples_count: int) -> tuple[bool, str]:
-    """Create a registered user with a stored face embedding."""
+def add_registered_user(
+    data: dict[str, str],
+    embedding: np.ndarray,
+    samples_count: int,
+    *,
+    human_validated: bool = False,
+) -> tuple[bool, str]:
+    """Create a user only from an embedding produced by the shared human gate."""
+    if not human_validated:
+        raise RuntimeError(
+            "Registration blocked: the embedding did not pass human/animal validation."
+        )
     required = ["name", "user_code", "email", "phone", "department"]
     missing = [field for field in required if not data.get(field, "").strip()]
     if missing:

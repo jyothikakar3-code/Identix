@@ -8,65 +8,28 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from utils.face_ai import detect_faces_bgr
+from utils.human_face_validation import FaceInputKind, FaceInputRejected
+
 
 # Supported image extensions for the local dataset folder.
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 
 
 def detect_human_face_from_pil(image: Image.Image) -> tuple[bool, int]:
-    """Detect whether a PIL image contains at least one human face."""
-
-    # Convert the image to RGB first so OpenCV receives a predictable image format.
-    rgb_image = image.convert("RGB")
-    rgb_array = np.array(rgb_image)
-
-    # Haar Cascades work on grayscale images.
-    grayscale_image = cv2.cvtColor(rgb_array, cv2.COLOR_RGB2GRAY)
-
-    # Improve contrast because classroom photos can be dim or unevenly lit.
-    grayscale_image = cv2.equalizeHist(grayscale_image)
-
-    # Very large images are resized for faster and more stable detection.
-    height, width = grayscale_image.shape
-    largest_side = max(height, width)
-    if largest_side > 900:
-        scale = 900 / largest_side
-        grayscale_image = cv2.resize(
-            grayscale_image,
-            (int(width * scale), int(height * scale)),
-            interpolation=cv2.INTER_AREA,
-        )
-
-    # Try several OpenCV human-face detectors. Different photos work better with different cascades.
-    cascade_filenames = [
-        "haarcascade_frontalface_default.xml",
-        "haarcascade_frontalface_alt.xml",
-        "haarcascade_frontalface_alt2.xml",
-        "haarcascade_profileface.xml",
-    ]
-
-    total_faces = 0
-    for cascade_filename in cascade_filenames:
-        cascade_path = cv2.data.haarcascades + cascade_filename
-        face_detector = cv2.CascadeClassifier(cascade_path)
-
-        # If one cascade cannot load, try the next one instead of crashing the app.
-        if face_detector.empty():
-            continue
-
-        detected_faces = face_detector.detectMultiScale(
-            grayscale_image,
-            scaleFactor=1.05,
-            minNeighbors=3,
-            minSize=(24, 24),
-        )
-        total_faces += len(detected_faces)
-
-    return total_faces > 0, int(total_faces)
+    """Detect centrally validated humans; animal images raise immediately."""
+    rgb_array = np.asarray(image.convert("RGB"))
+    frame_bgr = cv2.cvtColor(rgb_array, cv2.COLOR_RGB2BGR)
+    detections = detect_faces_bgr(frame_bgr)
+    return bool(detections), len(detections)
 
 
 def prepare_image_from_pil(image: Image.Image, image_size: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
-    """Convert a PIL image to grayscale, resize it, and flatten it into a vector."""
+    """Validate a human, then convert it to an Eigenfaces vector."""
+
+    found_human, _ = detect_human_face_from_pil(image)
+    if not found_human:
+        raise FaceInputRejected(FaceInputKind.NO_FACE)
 
     # Convert the uploaded image to RGB first so OpenCV receives a predictable format.
     rgb_image = image.convert("RGB")
@@ -129,4 +92,3 @@ def infer_label_from_filename(filename: str) -> str:
             return name_without_extension.split(separator)[0].strip() or name_without_extension
 
     return name_without_extension
-

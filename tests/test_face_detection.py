@@ -32,8 +32,15 @@ class FaceDetectionTests(unittest.TestCase):
 
         noise = np.random.default_rng(7).integers(0, 256, (480, 640, 3), dtype=np.uint8)
 
-        for image in (apple, car, noise):
-            self.assertEqual(app.detect_faces(image), [])
+        no_face_result = unittest.mock.Mock(
+            kind=app.FaceInputKind.NO_FACE,
+            detections=(),
+        )
+        # The neural classifier is independently tested in test_animal_guard;
+        # this synthetic regression remains an offline detector-only test.
+        with patch.object(app, "validate_human_candidates", return_value=no_face_result):
+            for image in (apple, car, noise):
+                self.assertEqual(app.detect_faces(image), [])
 
     def test_missing_detector_never_fabricates_a_face(self) -> None:
         image = np.zeros((480, 640, 3), dtype=np.uint8)

@@ -25,6 +25,16 @@ import pandas as pd
 import streamlit as st
 from PIL import Image
 
+from utils.human_face_validation import (
+    ANIMAL_FACE_MESSAGE,
+    MODEL_FILENAME as ANIMAL_CLASSIFIER_MODEL_FILENAME,
+    NO_FACE_MESSAGE,
+    FaceInputKind,
+    FaceInputRejected,
+    require_validated_detection,
+    validate_human_candidates,
+)
+
 try:
     import psycopg
     from psycopg.rows import dict_row
@@ -77,6 +87,7 @@ SFACE_MODEL_URL = (
     "https://github.com/opencv/opencv_zoo/raw/main/models/"
     "face_recognition_sface/face_recognition_sface_2021dec.onnx"
 )
+ANIMAL_CLASSIFIER_MODEL_PATH = MODEL_DIR / ANIMAL_CLASSIFIER_MODEL_FILENAME
 REGISTRATION_DETECTION_THRESHOLD = 0.65
 FACE_DETECTION_THRESHOLD = 0.70
 RECOGNITION_COSINE_THRESHOLD = 0.50
@@ -574,10 +585,11 @@ def count_visible_eyes(
     return plausible_eye_count(eyes, w, h)
 
 
-def detect_faces(
+def _detect_face_candidates(
     frame_bgr: np.ndarray,
     confidence_threshold: float = FACE_DETECTION_THRESHOLD,
 ) -> list[dict[str, Any]]:
+    """Return raw face-shaped candidates; callers must use ``detect_faces``."""
     yunet_detections = detect_faces_yunet(frame_bgr, confidence_threshold)
     if yunet_detections is not None:
         return yunet_detections
@@ -631,6 +643,28 @@ def detect_faces(
     return kept
 
 
+def detect_faces(
+    frame_bgr: np.ndarray,
+    confidence_threshold: float = FACE_DETECTION_THRESHOLD,
+) -> list[dict[str, Any]]:
+    """Return only human-validated faces or reject an animal image.
+
+    This is the single gate used by every active workflow.  YuNet/Haar first
+    finds face-shaped regions; the independent animal classifier then filters
+    them.  A full-image check distinguishes animal-only images from invalid
+    images even when the human-specific detector correctly returns no boxes.
+    """
+    candidates = _detect_face_candidates(frame_bgr, confidence_threshold)
+    result = validate_human_candidates(
+        frame_bgr,
+        candidates,
+        ANIMAL_CLASSIFIER_MODEL_PATH,
+    )
+    if result.kind is FaceInputKind.ANIMAL:
+        raise FaceInputRejected(FaceInputKind.ANIMAL)
+    return list(result.detections)
+
+
 def crop_face(frame_bgr: np.ndarray, box: tuple[int, int, int, int]) -> np.ndarray:
     x, y, w, h = box
     pad = int(max(w, h) * 0.14)
@@ -662,13 +696,13 @@ def sface_recognizer() -> Any:
 
 
 def embedding(face_bgr: np.ndarray) -> list[float]:
-    if face_bgr.size == 0:
-        return []
-    recognizer = sface_recognizer()
-    if recognizer is None:
-        raise RuntimeError("The face-recognition model could not be loaded.")
-    normalized_face = cv2.resize(face_bgr, (112, 112), interpolation=cv2.INTER_AREA)
-    return sface_feature(recognizer, normalized_face)
+    """Safely embed a standalone image only after central human validation."""
+    detections = detect_faces(face_bgr)
+    if not detections:
+        raise FaceInputRejected(FaceInputKind.NO_FACE)
+    if len(detections) != 1:
+        raise RuntimeError(f"Expected one human face; found {len(detections)}.")
+    return embedding_from_detection(face_bgr, detections[0])
 
 
 def sface_feature(recognizer: Any, aligned_face: np.ndarray) -> list[float]:
@@ -683,6 +717,9 @@ def embedding_from_detection(
     detection: dict[str, Any],
 ) -> list[float]:
     """Align a YuNet face by its landmarks before extracting SFace features."""
+    # Defense in depth: even future code cannot send a raw detector box to the
+    # embedding model without first passing the shared human/animal gate.
+    require_validated_detection(detection)
     recognizer = sface_recognizer()
     if recognizer is None:
         raise RuntimeError("The face-recognition model could not be loaded.")
@@ -694,6 +731,7 @@ def aligned_face_from_detection(
     detection: dict[str, Any],
 ) -> np.ndarray:
     """Return a landmark-aligned 112x112 face for SFace inference."""
+    require_validated_detection(detection)
     recognizer = sface_recognizer()
     if recognizer is None:
         raise RuntimeError("The face-recognition model could not be loaded.")
@@ -761,7 +799,7 @@ def detect_registration_face(
             if quality_ok:
                 return detections[0], "" if attempt == 0 else "recovered by detection retry"
             return None, reason
-    return None, "no face found after three detection attempts"
+    return None, NO_FACE_MESSAGE
 
 
 def cosine(a: list[float], b: list[float]) -> float:
@@ -789,6 +827,7 @@ def verification_embedding(
     detection: dict[str, Any],
 ) -> list[float]:
     """Average original and mirrored aligned features to reduce pose sensitivity."""
+    require_validated_detection(detection)
     recognizer = sface_recognizer()
     if recognizer is None:
         raise RuntimeError("The face-recognition model could not be loaded.")
@@ -879,6 +918,8 @@ def analyze_liveness_frames(
             frame_detections = detect_faces(frame, REGISTRATION_DETECTION_THRESHOLD)
         except (RuntimeError, cv2.error) as error:
             return {"live": False, "reason": str(error)}
+        if not frame_detections:
+            return {"live": False, "reason": NO_FACE_MESSAGE}
         if len(frame_detections) != 1:
             return {
                 "live": False,
@@ -1508,7 +1549,7 @@ def face_detection() -> None:
         if detections:
             st.dataframe(pd.DataFrame([{"Face": i + 1, "Confidence": f"{d['confidence']:.1%}", "Box": d["box"]} for i, d in enumerate(detections)]), hide_index=True, width="stretch")
         else:
-            st.warning("No face was detected. Try a clearer frontal image with good lighting.")
+            st.warning(NO_FACE_MESSAGE)
 
 
 def face_registration() -> None:
@@ -1552,10 +1593,23 @@ def face_registration() -> None:
         failed_samples = []
         for index, file in enumerate(files):
             frame = uploaded_to_bgr(file)
-            detection, reason = detect_registration_face(frame)
+            try:
+                detection, reason = detect_registration_face(frame)
+            except FaceInputRejected as error:
+                # An animal is never a retryable registration sample: stop the
+                # entire enrollment before any image or embedding is stored.
+                st.error(str(error))
+                return
+            except RuntimeError as error:
+                st.error(str(error))
+                return
             if detection is None:
                 failed_samples.append(index + 1)
-                st.warning(f"Retry sample {index + 1}: {reason}.")
+                if reason == NO_FACE_MESSAGE:
+                    st.warning(NO_FACE_MESSAGE)
+                    st.caption(f"Registration sample {index + 1} needs to be retaken.")
+                else:
+                    st.warning(f"Retry sample {index + 1}: {reason}.")
                 continue
             face = crop_face(frame, detection["box"])
             try:
@@ -1602,11 +1656,15 @@ def face_registration() -> None:
 
 
 def process_recognition_frame(frame: np.ndarray, camera_name: str, mark: bool) -> None:
-    detections = detect_faces(frame)
+    try:
+        detections = detect_faces(frame)
+    except RuntimeError as error:
+        st.error(str(error))
+        return
     labels = []
     records = []
     if not detections:
-        st.warning("No face detected.")
+        st.warning(NO_FACE_MESSAGE)
         return
     for detection in detections:
         face = crop_face(frame, detection["box"])
@@ -1667,6 +1725,9 @@ def verification() -> None:
             except RuntimeError as error:
                 st.error(str(error))
                 return
+            if not detections:
+                st.error(NO_FACE_MESSAGE)
+                return
             if len(detections) != 1:
                 st.error(f"Image {idx + 1} must contain exactly one detectable face. Found {len(detections)}.")
                 return
@@ -1714,7 +1775,10 @@ def liveness() -> None:
         if result["live"]:
             st.success("Live Person")
         else:
-            st.error(f"Liveness not verified: {result['reason']}")
+            if result["reason"] in (ANIMAL_FACE_MESSAGE, NO_FACE_MESSAGE):
+                st.error(result["reason"])
+            else:
+                st.error(f"Liveness not verified: {result['reason']}")
         if "eye_counts" in result:
             st.write(
                 {

@@ -12,8 +12,17 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from utils.database import decode_embedding
+from utils.human_face_validation import (
+    MODEL_FILENAME,
+    NO_FACE_MESSAGE,
+    FaceInputKind,
+    FaceInputRejected,
+    VALIDATION_MARKER,
+    validate_human_candidates,
+)
 
 FACE_SIZE = (96, 96)
+ANIMAL_CLASSIFIER_MODEL_PATH = Path(__file__).parents[1] / "models" / MODEL_FILENAME
 
 
 @dataclass
@@ -25,6 +34,7 @@ class Detection:
     w: int
     h: int
     confidence: float
+    human_validation: str | None = None
 
 
 @dataclass
@@ -53,8 +63,8 @@ def _cascade(filename: str) -> cv2.CascadeClassifier:
     return cv2.CascadeClassifier(cv2.data.haarcascades + filename)
 
 
-def detect_faces_bgr(frame: np.ndarray) -> list[Detection]:
-    """Detect one or more human faces in a BGR image."""
+def _detect_face_candidates_bgr(frame: np.ndarray) -> list[Detection]:
+    """Return legacy Haar candidates; callers must use ``detect_faces_bgr``."""
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     gray = cv2.equalizeHist(gray)
     cascade_names = [
@@ -83,6 +93,36 @@ def detect_faces_bgr(frame: np.ndarray) -> list[Detection]:
     return boxes
 
 
+def detect_faces_bgr(frame: np.ndarray) -> list[Detection]:
+    """Return only centrally validated human faces from the legacy API."""
+    candidates = _detect_face_candidates_bgr(frame)
+    candidate_dicts = [
+        {
+            "box": (item.x, item.y, item.w, item.h),
+            "confidence": item.confidence / 100.0,
+        }
+        for item in candidates
+    ]
+    result = validate_human_candidates(
+        frame,
+        candidate_dicts,
+        ANIMAL_CLASSIFIER_MODEL_PATH,
+    )
+    if result.kind is FaceInputKind.ANIMAL:
+        raise FaceInputRejected(FaceInputKind.ANIMAL)
+    return [
+        Detection(
+            int(item["box"][0]),
+            int(item["box"][1]),
+            int(item["box"][2]),
+            int(item["box"][3]),
+            round(float(item["confidence"]) * 100.0, 2),
+            str(item["human_validation"]),
+        )
+        for item in result.detections
+    ]
+
+
 def crop_face(frame: np.ndarray, detection: Detection) -> np.ndarray:
     """Crop a face with a small margin."""
     height, width = frame.shape[:2]
@@ -95,8 +135,12 @@ def crop_face(frame: np.ndarray, detection: Detection) -> np.ndarray:
     return frame[y1:y2, x1:x2]
 
 
-def face_embedding(face_bgr: np.ndarray) -> np.ndarray:
-    """Create a compact normalized embedding from a cropped face."""
+def face_embedding(face_bgr: np.ndarray, *, human_validated: bool = False) -> np.ndarray:
+    """Create an embedding only for a candidate accepted by the shared gate."""
+    if not human_validated:
+        raise RuntimeError(
+            "Face embedding blocked: the candidate did not pass human/animal validation."
+        )
     gray = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2GRAY)
     gray = cv2.equalizeHist(gray)
     resized = cv2.resize(gray, FACE_SIZE, interpolation=cv2.INTER_AREA)
@@ -114,7 +158,10 @@ def embedding_from_image(image: Image.Image) -> tuple[np.ndarray | None, list[De
     if not detections:
         return None, detections, annotated
     face = crop_face(frame, detections[0])
-    return face_embedding(face), detections, annotated
+    return face_embedding(
+        face,
+        human_validated=detections[0].human_validation == VALIDATION_MARKER,
+    ), detections, annotated
 
 
 def similarity_percent(first: np.ndarray, second: np.ndarray) -> float:
@@ -133,7 +180,10 @@ def recognize_faces(image: Image.Image, users: list[dict[str, Any]], threshold: 
     known_embeddings = [(user, decode_embedding(user["embedding"])) for user in users]
 
     for detection in detections:
-        embedding = face_embedding(crop_face(frame, detection))
+        embedding = face_embedding(
+            crop_face(frame, detection),
+            human_validated=detection.human_validation == VALIDATION_MARKER,
+        )
         best_user = None
         best_score = 0.0
         for user, known_embedding in known_embeddings:
@@ -178,7 +228,7 @@ def compare_two_faces(first: Image.Image, second: Image.Image) -> tuple[bool, fl
     first_embedding, first_detections, first_annotated = embedding_from_image(first)
     second_embedding, second_detections, second_annotated = embedding_from_image(second)
     if first_embedding is None or second_embedding is None:
-        return False, 0.0, "Could not detect a human face in one or both images.", first_annotated, second_annotated
+        return False, 0.0, NO_FACE_MESSAGE, first_annotated, second_annotated
     similarity = similarity_percent(first_embedding, second_embedding)
     same = similarity >= 72.0
     message = "Same person" if same else "Different people"
@@ -194,7 +244,7 @@ def liveness_from_frames(open_eye_image: Image.Image | None, blink_image: Image.
     frames = [pil_to_bgr(open_eye_image), pil_to_bgr(blink_image), pil_to_bgr(turn_image)]
     detections = [detect_faces_bgr(frame) for frame in frames]
     if any(len(items) == 0 for items in detections):
-        return False, "Spoof Detected: a human face was not detected in every liveness step.", {"faces": [len(items) for items in detections]}
+        return False, NO_FACE_MESSAGE, {"faces": [len(items) for items in detections]}
 
     eye_counts = []
     centers = []

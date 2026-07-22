@@ -41,8 +41,18 @@ class EigenfacesRecognizer:
         self.label_centroids: dict[str, np.ndarray] = {}
         self.unknown_threshold: float = 0.0
 
-    def fit(self, image_vectors: list[np.ndarray], labels: list[str]) -> None:
-        """Train PCA and store the reduced representation of each training face."""
+    def fit(
+        self,
+        image_vectors: list[np.ndarray],
+        labels: list[str],
+        *,
+        human_validated: bool = False,
+    ) -> None:
+        """Train only on vectors produced by validated human preprocessing."""
+        if not human_validated:
+            raise RuntimeError(
+                "Eigenfaces training blocked: inputs did not pass human/animal validation."
+            )
 
         # Build matrix X where each row is one face vector.
         data_matrix = np.vstack(image_vectors).astype("float32")
@@ -77,8 +87,17 @@ class EigenfacesRecognizer:
         # If a test face is farther than this, the app marks it as an unknown person.
         self.unknown_threshold = self._estimate_unknown_threshold()
 
-    def recognize(self, test_vector: np.ndarray) -> FaceRecognitionResult:
-        """Project the test face into PCA space and compare it with training faces."""
+    def recognize(
+        self,
+        test_vector: np.ndarray,
+        *,
+        human_validated: bool = False,
+    ) -> FaceRecognitionResult:
+        """Compare only a vector produced by validated human preprocessing."""
+        if not human_validated:
+            raise RuntimeError(
+                "Eigenfaces recognition blocked: input did not pass human/animal validation."
+            )
 
         if self.pca is None or self.train_projections is None:
             raise ValueError("The recognizer must be trained before recognizing a face.")
@@ -236,4 +255,3 @@ class EigenfacesRecognizer:
 
         confidence = max(0.0, 100.0 * (1.0 - distance / (typical_distance * 2.0)))
         return round(min(confidence, 100.0), 2)
-
