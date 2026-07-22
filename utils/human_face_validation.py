@@ -46,10 +46,10 @@ MODEL_MIN_BYTES = 45_000_000
 MODEL_MAX_BYTES = 60_000_000
 
 # ImageNet-1K IDs 0..397 contain fish, birds, reptiles, amphibians, insects,
-# mammals, and domestic/wild animals. Teddy bears are included so a toy that
-# triggers the face detector is rejected before embedding. New classifier
-# versions can extend/replace this immutable taxonomy in one place.
-ANIMAL_CLASS_IDS = frozenset(range(398)) | {850}
+# mammals, and domestic/wild animals. Teddy-bear and comic-book proxies cover
+# stuffed and illustrated/cartoon animals that trigger a face detector. New
+# classifier versions can extend/replace this immutable taxonomy in one place.
+ANIMAL_CLASS_IDS = frozenset(range(398)) | {850, 917}
 
 # These conservative defaults prioritize not accepting an animal as human.
 # They remain configurable for a labelled deployment-specific calibration set.
@@ -183,10 +183,10 @@ def animal_evidence_from_logits(logits: np.ndarray) -> AnimalEvidence:
     top_class_id = int(top5[0])
     top_probability = float(probabilities[top_class_id])
     top_animal_id = max(ANIMAL_CLASS_IDS, key=lambda class_id: float(probabilities[class_id]))
-    non_animal_ids = np.arange(398, probabilities.size)
-    # Teddy bear is explicitly animal-like for this product, so exclude it
-    # from the competing non-animal score.
-    non_animal_ids = non_animal_ids[non_animal_ids != 850]
+    non_animal_ids = np.asarray(
+        [class_id for class_id in range(398, probabilities.size) if class_id not in ANIMAL_CLASS_IDS],
+        dtype=np.int32,
+    )
     top_non_animal_probability = float(np.max(probabilities[non_animal_ids]))
     top_animal_probability = float(probabilities[top_animal_id])
     animal_top5_mass = float(

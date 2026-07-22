@@ -138,10 +138,11 @@ class HumanAnimalValidationTests(unittest.TestCase):
             logits[class_id] = 12.0
             self.assertTrue(animal_evidence_from_logits(logits).animal_like, class_id)
 
-    def test_teddy_bear_is_rejected_as_animal_like(self) -> None:
-        logits = np.full(1000, -12.0, dtype=np.float32)
-        logits[850] = 12.0
-        self.assertTrue(animal_evidence_from_logits(logits).animal_like)
+    def test_toy_and_cartoon_proxies_are_rejected_as_animal_like(self) -> None:
+        for class_id in (850, 917):
+            logits = np.full(1000, -12.0, dtype=np.float32)
+            logits[class_id] = 12.0
+            self.assertTrue(animal_evidence_from_logits(logits).animal_like)
 
     def test_non_animal_logits_do_not_fabricate_an_animal(self) -> None:
         logits = np.full(1000, -12.0, dtype=np.float32)
