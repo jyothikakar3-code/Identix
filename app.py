@@ -1508,10 +1508,10 @@ def login_screen() -> None:
                 </div>
                 <div class="identix-kicker">AI-powered recognition</div>
                 <h1 class="identix-headline">See the person.<br><span>Know the identity.</span></h1>
-                <p class="identix-copy">A secure command center for face recognition, attendance, access control, liveness verification, and visitor intelligence.</p>
+                <p class="identix-copy">A secure command center for face recognition, attendance, access control, and visitor intelligence.</p>
                 <div class="identix-features">
                     <span class="identix-feature"><b>●</b>Face intelligence</span>
-                    <span class="identix-feature"><b>●</b>Liveness checks</span>
+                    <span class="identix-feature"><b>●</b>Access controls</span>
                     <span class="identix-feature"><b>●</b>Smart attendance</span>
                 </div>
             </section>
@@ -1566,7 +1566,7 @@ def sidebar() -> str:
     user = st.session_state["user"]
     st.sidebar.title("AI Face System")
     st.sidebar.caption(f"{user['display_name']} · {user['role']}")
-    base_pages = ["Dashboard", "Face Detection", "Face Registration", "Face Recognition", "Face Verification", "Liveness Detection", "Attendance", "Unknown Alerts", "Reports", "Cameras", "Profile", "Help", "About"]
+    base_pages = ["Dashboard", "Face Detection", "Face Registration", "Face Recognition", "Face Verification", "Attendance", "Unknown Alerts", "Reports", "Cameras", "Profile", "Help", "About"]
     if user["role"] == "Administrator":
         pages = base_pages + ["User Management", "Settings", "Activity Logs"]
     elif user["role"] == "Teacher/Manager":
@@ -2185,16 +2185,12 @@ def settings_page() -> None:
         threshold = st.slider("Recognition cosine threshold", 0.30, 0.80, setting("recognition_threshold", float), 0.01)
         duplicate = st.number_input("Duplicate attendance prevention interval (minutes)", 1, 480, setting("duplicate_minutes", int))
         fps = st.number_input("Target FPS indicator", 1, 60, setting("camera_fps_target", int))
-        blink = st.toggle("Require blink evidence for liveness", value=setting("blink_required", bool))
-        movement = st.toggle("Require head movement for liveness", value=setting("head_movement_required", bool))
         submit = st.form_submit_button("Save Settings", width="stretch")
     if submit:
         for key, value in {
             "recognition_threshold": threshold,
             "duplicate_minutes": duplicate,
             "camera_fps_target": fps,
-            "blink_required": blink,
-            "head_movement_required": movement,
         }.items():
             set_setting(key, value)
         log("Settings updated")
@@ -2239,7 +2235,6 @@ def help_page() -> None:
         """
         <div class='soft-box'><b>Registration:</b> add identity details and at least two clear face images.</div>
         <div class='soft-box'><b>Recognition:</b> capture or upload a frame. Known faces can automatically mark attendance.</div>
-        <div class='soft-box'><b>Liveness:</b> capture neutral, blink, and head-turn frames to reduce photo or screen spoofing.</div>
         <div class='soft-box'><b>Cameras:</b> use <code>0</code> for the default webcam, another device index for USB cameras, or an RTSP/IP URL.</div>
         """,
         unsafe_allow_html=True,
@@ -2248,7 +2243,7 @@ def help_page() -> None:
 
 def about_page() -> None:
     st.title("About")
-    st.write("This local AI web application combines face detection, registration, recognition, verification, liveness checks, attendance automation, camera management, visitor alerts, analytics, reporting, and role-based access control.")
+    st.write("This local AI web application combines face detection, registration, recognition, verification, attendance automation, camera management, visitor alerts, analytics, reporting, and role-based access control.")
     st.info("For higher-security production deployments, connect a dedicated face-recognition model, HTTPS authentication, encrypted backups, and organization-specific privacy controls.")
 
 
@@ -2266,7 +2261,6 @@ def main() -> None:
         "Face Registration": face_registration,
         "Face Recognition": face_recognition,
         "Face Verification": verification,
-        "Liveness Detection": liveness,
         "Attendance": attendance_page,
         "Unknown Alerts": unknown_alerts,
         "Reports": reports,

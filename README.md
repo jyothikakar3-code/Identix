@@ -1,7 +1,7 @@
 # AI Face Recognition Management System
 
 Production-style Streamlit application for face detection, registration, recognition,
-verification, liveness checks, attendance automation, unknown visitor alerts, camera
+verification, attendance automation, unknown visitor alerts, camera
 management, reports, analytics, role-based access, profile management, and settings.
 
 ## Run
