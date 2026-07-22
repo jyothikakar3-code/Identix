@@ -89,6 +89,7 @@ SFACE_MODEL_URL = (
 )
 ANIMAL_CLASSIFIER_MODEL_PATH = MODEL_DIR / ANIMAL_CLASSIFIER_MODEL_FILENAME
 REGISTRATION_DETECTION_THRESHOLD = 0.65
+LIVENESS_RECOVERY_DETECTION_THRESHOLD = 0.50
 FACE_DETECTION_THRESHOLD = 0.70
 RECOGNITION_COSINE_THRESHOLD = 0.50
 VERIFICATION_COSINE_THRESHOLD = 0.36
@@ -847,6 +848,32 @@ def detect_registration_face(
     return None, NO_FACE_MESSAGE
 
 
+def detect_liveness_face(
+    frame_bgr: np.ndarray,
+) -> tuple[dict[str, Any] | None, str]:
+    """Find one human face in a blink/turn frame with bounded retries.
+
+    Closed eyes, mild motion, and a side turn reduce YuNet confidence. Liveness
+    therefore retries the original and safely enhanced frames at one lower
+    threshold. Every attempt still passes through the shared human/animal gate;
+    the lower detector threshold cannot create an embedding bypass.
+    """
+    for variant in registration_frame_variants(frame_bgr):
+        for threshold in (
+            REGISTRATION_DETECTION_THRESHOLD,
+            LIVENESS_RECOVERY_DETECTION_THRESHOLD,
+        ):
+            try:
+                detections = detect_faces(variant, threshold)
+            except cv2.error:
+                continue
+            if len(detections) > 1:
+                return None, f"Exactly one human face is required; found {len(detections)}."
+            if len(detections) == 1:
+                return detections[0], ""
+    return None, NO_FACE_MESSAGE
+
+
 def cosine(a: list[float], b: list[float]) -> float:
     av = np.array(a, dtype=np.float32)
     bv = np.array(b, dtype=np.float32)
@@ -917,7 +944,14 @@ def evaluate_liveness_evidence(
     movement_required: bool = True,
 ) -> dict[str, Any]:
     """Evaluate the ordered neutral, blink, turn-head challenge."""
-    blink_ok = len(eye_counts) == 3 and eye_counts[0] == 2 and eye_counts[1] <= 1
+    # Haar may see only one neutral eye under glasses, low light, or mild pose.
+    # Require an actual drop in the deliberately blinked second frame instead
+    # of insisting that the neutral frame always contains a perfect pair.
+    blink_ok = (
+        len(eye_counts) == 3
+        and eye_counts[0] >= 1
+        and eye_counts[1] < eye_counts[0]
+    )
     center_shift = abs(first_state["center_x"] - last_state["center_x"]) / first_state["width"]
     yaw_shift = abs(first_state["yaw"] - last_state["yaw"])
     movement = max(center_shift, yaw_shift)
@@ -960,24 +994,28 @@ def analyze_liveness_frames(
     embeddings = []
     for index, frame in enumerate(frames):
         try:
-            frame_detections = detect_faces(frame, REGISTRATION_DETECTION_THRESHOLD)
+            detection, detection_reason = detect_liveness_face(frame)
+        except FaceInputRejected as error:
+            return {"live": False, "reason": str(error), "frame_index": index}
         except (RuntimeError, cv2.error) as error:
-            return {"live": False, "reason": str(error)}
-        if not frame_detections:
-            return {"live": False, "reason": NO_FACE_MESSAGE}
-        if len(frame_detections) != 1:
             return {
                 "live": False,
-                "reason": f"Frame {index + 1} must contain exactly one face; found {len(frame_detections)}.",
+                "reason": str(error),
+                "frame_index": index,
             }
-        detection = frame_detections[0]
+        if detection is None:
+            return {
+                "live": False,
+                "reason": detection_reason,
+                "frame_index": index,
+            }
         try:
             eye_counts.append(
                 count_visible_eyes(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), detection["box"])
             )
             embeddings.append(embedding_from_detection(frame, detection))
         except (RuntimeError, cv2.error) as error:
-            return {"live": False, "reason": str(error)}
+            return {"live": False, "reason": str(error), "frame_index": index}
         detections.append(detection)
 
     identity_similarities = [
@@ -1811,20 +1849,56 @@ def verification() -> None:
 
 def liveness() -> None:
     st.title("Liveness Detection")
-    st.write("Capture three frames: neutral, blink, and turn head. The system checks face presence, eye change, and head movement.")
+    st.write("Complete the three ordered steps below. Each frame is checked for exactly one human face before it is accepted.")
     if "live_frames" not in st.session_state:
         st.session_state.live_frames = []
+    frame_steps = (
+        "Look straight at the camera with both eyes open.",
+        "Keep your face centered and close your eyes for a clear blink.",
+        "Open your eyes and turn your head slightly left or right.",
+    )
+    completed = min(len(st.session_state.live_frames), 3)
+    if completed < 3:
+        st.info(f"Step {completed + 1} of 3: {frame_steps[completed]}")
+    else:
+        st.success("All three frames are ready. Run liveness verification.")
     sample = st.camera_input("Capture liveness frame")
-    if sample and st.button("Add frame to liveness check", width="stretch"):
-        st.session_state.live_frames.append(uploaded_to_bgr(sample))
-        st.toast(f"Captured frame {len(st.session_state.live_frames)}.", icon="📷")
+    if sample and st.button(
+        "Validate and add this frame",
+        disabled=completed >= 3,
+        width="stretch",
+    ):
+        frame = uploaded_to_bgr(sample)
+        error_displayed = False
+        try:
+            detection, reason = detect_liveness_face(frame)
+        except FaceInputRejected as error:
+            st.error(str(error))
+            detection, reason = None, str(error)
+            error_displayed = True
+        except (RuntimeError, cv2.error) as error:
+            st.error(str(error))
+            detection, reason = None, str(error)
+            error_displayed = True
+        if detection is None:
+            if not error_displayed:
+                st.error(reason)
+            st.caption(f"Step {completed + 1} was not saved. Retake that frame with your full face visible and well lit.")
+        else:
+            st.session_state.live_frames.append(frame)
+            st.toast(f"Step {completed + 1} accepted.", icon="✅")
+            st.rerun()
     cols = st.columns(3)
-    for i, frame in enumerate(st.session_state.live_frames[-3:]):
-        cols[i].image(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)), caption=f"Frame {i + 1}", width="stretch")
+    frame_names = ("Neutral", "Blink", "Head turn")
+    for i, frame in enumerate(st.session_state.live_frames[:3]):
+        cols[i].image(
+            Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)),
+            caption=f"Step {i + 1}: {frame_names[i]}",
+            width="stretch",
+        )
     if st.button("Run liveness verification", disabled=len(st.session_state.live_frames) < 3, width="stretch"):
-        latest = st.session_state.live_frames[-3:]
         result = analyze_liveness_frames(
-            latest,
+            st.session_state.live_frames[:3],
             setting("blink_required", bool),
             setting("head_movement_required", bool),
         )
@@ -1835,6 +1909,9 @@ def liveness() -> None:
                 st.error(result["reason"])
             else:
                 st.error(f"Liveness not verified: {result['reason']}")
+            if "frame_index" in result:
+                failed_index = int(result["frame_index"])
+                st.caption(f"Problem found in step {failed_index + 1}: {frame_names[failed_index]}. Retake the three-frame session.")
         if "eye_counts" in result:
             st.write(
                 {

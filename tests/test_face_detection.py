@@ -327,6 +327,53 @@ class ApplicationRegressionTests(unittest.TestCase):
         self.assertTrue(result["blink_ok"])
         self.assertTrue(result["move_ok"])
 
+    def test_liveness_accepts_one_visible_neutral_eye_followed_by_closed_eyes(self) -> None:
+        first_state = {"center_x": 100.0, "width": 100.0, "yaw": 0.0}
+        last_state = {"center_x": 112.0, "width": 100.0, "yaw": 0.10}
+        result = app.evaluate_liveness_evidence(
+            [1, 0, 2], first_state, last_state, [0.80, 0.70]
+        )
+        self.assertTrue(result["live"])
+        self.assertTrue(result["blink_ok"])
+
+    def test_liveness_face_detection_retries_at_recovery_threshold(self) -> None:
+        frame = np.zeros((160, 160, 3), dtype=np.uint8)
+        detection = {"box": (20, 20, 100, 100), "human_validation": "test"}
+        with patch.object(
+            app, "registration_frame_variants", return_value=[frame]
+        ), patch.object(
+            app, "detect_faces", side_effect=[[], [detection]]
+        ) as face_detector:
+            result, reason = app.detect_liveness_face(frame)
+
+        self.assertEqual(result, detection)
+        self.assertEqual(reason, "")
+        self.assertEqual(
+            [call.args[1] for call in face_detector.call_args_list],
+            [
+                app.REGISTRATION_DETECTION_THRESHOLD,
+                app.LIVENESS_RECOVERY_DETECTION_THRESHOLD,
+            ],
+        )
+
+    def test_liveness_reports_the_exact_frame_that_missed_a_face(self) -> None:
+        frames = [np.zeros((160, 160, 3), dtype=np.uint8) for _ in range(3)]
+        detection = {"box": (20, 20, 100, 100)}
+        with patch.object(
+            app,
+            "detect_liveness_face",
+            side_effect=[(detection, ""), (None, app.NO_FACE_MESSAGE)],
+        ), patch.object(
+            app, "count_visible_eyes", return_value=2
+        ), patch.object(
+            app, "embedding_from_detection", return_value=[1.0, 0.0]
+        ):
+            result = app.analyze_liveness_frames(frames)
+
+        self.assertFalse(result["live"])
+        self.assertEqual(result["reason"], app.NO_FACE_MESSAGE)
+        self.assertEqual(result["frame_index"], 1)
+
     def test_liveness_rejects_different_faces_across_frames(self) -> None:
         first_state = {"center_x": 100.0, "width": 100.0, "yaw": 0.0}
         last_state = {"center_x": 112.0, "width": 100.0, "yaw": 0.10}
