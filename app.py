@@ -161,6 +161,51 @@ def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 
+def normalize_username(username: str) -> str:
+    """Keep login names predictable while display names remain free-form."""
+    return username.strip().lower()
+
+
+def valid_username(username: str) -> bool:
+    """Accept simple, URL-safe login names from 3 to 50 characters."""
+    return 3 <= len(username) <= 50 and all(
+        character.isalnum() or character in "._-" for character in username
+    )
+
+
+def authenticate_user(identifier: str, password: str) -> dict[str, Any] | None:
+    """Authenticate using an unambiguous username, display name, or email.
+
+    Display names are allowed for backwards-compatible recovery from the old
+    Profile screen, but duplicate matches are rejected instead of selecting an
+    arbitrary account.
+    """
+    identifier = identifier.strip()
+    if not identifier or not password:
+        return None
+    matches = rows(
+        "auth_users",
+        "WHERE password_hash = ? AND ("
+        "LOWER(username) = LOWER(?) OR "
+        "LOWER(display_name) = LOWER(?) OR "
+        "LOWER(COALESCE(email, '')) = LOWER(?)"
+        ")",
+        (hash_password(password), identifier, identifier, identifier),
+    )
+    return matches[0] if len(matches) == 1 else None
+
+
+def default_admin_credentials_active() -> bool:
+    """Only advertise the starter password while it is actually valid."""
+    return bool(
+        rows(
+            "auth_users",
+            "WHERE LOWER(username) = 'admin' AND password_hash = ?",
+            (hash_password("admin123"),),
+        )
+    )
+
+
 def now_iso() -> str:
     return datetime.now().replace(microsecond=0).isoformat(sep=" ")
 
@@ -1445,22 +1490,33 @@ def login_screen() -> None:
             unsafe_allow_html=True,
         )
         with st.form("login"):
-            username = st.text_input("Username", autocomplete="username")
+            identifier = st.text_input("Username, display name, or email", autocomplete="username")
             password = st.text_input("Password", type="password", autocomplete="current-password")
             submitted = st.form_submit_button("Enter Identix", width="stretch")
-        st.markdown(
-            """
-            <div class="demo-access">
-                <span class="demo-access-label">Demo access</span>
-                <span class="demo-access-values"><code>admin</code> &nbsp;·&nbsp; <code>admin123</code></span>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        if default_admin_credentials_active():
+            st.markdown(
+                """
+                <div class="demo-access">
+                    <span class="demo-access-label">Demo access</span>
+                    <span class="demo-access-values"><code>admin</code> &nbsp;·&nbsp; <code>admin123</code></span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                """
+                <div class="demo-access">
+                    <span class="demo-access-label">Sign-in options</span>
+                    <span class="demo-access-values">Use your username, display name, or email.</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
         if submitted:
-            user = rows("auth_users", "WHERE username = ? AND password_hash = ?", (username, hash_password(password)))
+            user = authenticate_user(identifier, password)
             if user:
-                st.session_state["user"] = user[0]
+                st.session_state["user"] = user
                 log("Login", "Successful login")
                 st.toast("Welcome back.", icon="✅")
                 st.rerun()
@@ -1941,7 +1997,8 @@ def user_management() -> None:
         password = c3.text_input("Temporary Password", type="password")
         submit = st.form_submit_button("Create Login", width="stretch")
     if submit:
-        if not username or not display or len(password) < 6:
+        username = normalize_username(username)
+        if not valid_username(username) or not display.strip() or len(password) < 6:
             st.error("Username, display name, and a password of at least 6 characters are required.")
         else:
             try:
@@ -1974,22 +2031,61 @@ def profile() -> None:
     st.title("Profile Management")
     user = st.session_state["user"]
     with st.form("profile"):
+        username = st.text_input(
+            "Username",
+            value=user["username"],
+            help="This is your unique login name. You may also sign in with your display name or email.",
+        )
         display = st.text_input("Display Name", value=user["display_name"])
         email = st.text_input("Email", value=user.get("email") or "")
         phone = st.text_input("Phone", value=user.get("phone") or "")
-        password = st.text_input("New Password", type="password")
+        password = st.text_input(
+            "New Password",
+            type="password",
+            help="Leave this blank to keep your current password.",
+        )
         submit = st.form_submit_button("Save Profile", width="stretch")
     if submit:
+        username = normalize_username(username)
+        display = display.strip()
+        email = email.strip()
+        phone = phone.strip()
+        if not valid_username(username):
+            st.error("Username must be 3–50 characters and may contain letters, numbers, dots, hyphens, or underscores.")
+            return
+        if not display:
+            st.error("Display name is required.")
+            return
         if password and len(password) < 6:
             st.error("Password must be at least 6 characters.")
             return
-        if password:
-            execute("UPDATE auth_users SET display_name=?, email=?, phone=?, password_hash=? WHERE id=?", (display, email, phone, hash_password(password), user["id"]))
-        else:
-            execute("UPDATE auth_users SET display_name=?, email=?, phone=? WHERE id=?", (display, email, phone, user["id"]))
+        duplicates = rows(
+            "auth_users",
+            "WHERE LOWER(username) = LOWER(?) AND id <> ?",
+            (username, user["id"]),
+        )
+        if duplicates:
+            st.error("That username is already in use.")
+            return
+        try:
+            if password:
+                execute(
+                    "UPDATE auth_users SET username=?, display_name=?, email=?, phone=?, password_hash=? WHERE id=?",
+                    (username, display, email, phone, hash_password(password), user["id"]),
+                )
+            else:
+                execute(
+                    "UPDATE auth_users SET username=?, display_name=?, email=?, phone=? WHERE id=?",
+                    (username, display, email, phone, user["id"]),
+                )
+        except DATABASE_INTEGRITY_ERRORS:
+            st.error("That username is already in use.")
+            return
         st.session_state["user"] = rows("auth_users", "WHERE id = ?", (user["id"],))[0]
         log("Profile updated")
-        st.success("Profile updated.")
+        st.success(
+            f"Profile updated. Sign in with '{username}', your display name, or your email."
+        )
 
 
 def settings_page() -> None:
