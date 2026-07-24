@@ -32,18 +32,19 @@ CLASSIFIER_UNAVAILABLE_MESSAGE = (
 )
 VALIDATION_MARKER = "human_animal_guard_v1"
 
-# Official ONNX Model Zoo EfficientNet-Lite4. It is a production mobile model
-# with 80.4% ImageNet top-1 accuracy and a published 30 ms Pixel 4 CPU result.
-# It executes through the already-installed OpenCV DNN runtime and covers the
-# broad ImageNet animal taxonomy without sending user images to a cloud API.
-MODEL_FILENAME = "efficientnet-lite4-11.onnx"
+# Official ONNX Model Zoo quantized EfficientNet-Lite4. The compact, checksum-
+# pinned model is committed with the app so a cold Streamlit restart never has
+# to download 50 MB while a user waits. It executes through the already-
+# installed OpenCV DNN runtime and covers the broad ImageNet animal taxonomy
+# without sending user images to a cloud API.
+MODEL_FILENAME = "efficientnet-lite4-11-int8.onnx"
 MODEL_URL = (
     "https://github.com/onnx/models/raw/main/validated/vision/classification/"
-    "efficientnet-lite4/model/efficientnet-lite4-11.onnx"
+    "efficientnet-lite4/model/efficientnet-lite4-11-int8.onnx"
 )
-MODEL_SHA256 = "d111689907c06eea7c82e4833ddef758da6453b9d4cf60b7e99ca05c7cbd9c12"
-MODEL_MIN_BYTES = 45_000_000
-MODEL_MAX_BYTES = 60_000_000
+MODEL_SHA256 = "2b3cbb5077262b20df565dacddecb3724c0976c35029a87e512d13aa4eff04a2"
+MODEL_MIN_BYTES = 13_000_000
+MODEL_MAX_BYTES = 14_000_000
 
 # ImageNet-1K IDs 0..397 contain fish, birds, reptiles, amphibians, insects,
 # mammals, and domestic/wild animals. Teddy-bear and comic-book proxies cover
