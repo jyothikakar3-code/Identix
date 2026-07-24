@@ -2171,12 +2171,7 @@ def settings_page() -> None:
     st.title("System Settings")
     if persistent_database_enabled():
         st.success("Persistent database connected. Registrations survive app updates and restarts.")
-    elif DATABASE_CONNECTION_ERROR:
-        st.error(
-            "Supabase could not connect. Local safe mode is active, so the app remains usable. "
-            "Correct DATABASE_URL in Streamlit Secrets to enable permanent storage."
-        )
-    else:
+    elif not DATABASE_CONNECTION_ERROR:
         st.warning(
             "Local SQLite mode is active. It is suitable for local development, but Streamlit Cloud "
             "registrations may disappear after a redeployment. Add DATABASE_URL in Streamlit Secrets."
