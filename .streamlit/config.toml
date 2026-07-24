@@ -10,3 +10,8 @@ font = "sans serif"
 headless = true
 enableCORS = false
 enableXsrfProtection = false
+
+[client]
+# Hide Streamlit's developer commands and their global shortcuts from users.
+# This prevents typing in registration fields from opening "Clear caches".
+toolbarMode = "minimal"
